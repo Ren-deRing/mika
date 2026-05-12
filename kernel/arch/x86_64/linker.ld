@@ -22,12 +22,20 @@ SECTIONS
 
     . = ALIGN(CONSTANT(MAXPAGESIZE));
 
-    .initcall : {
-        __initcall_start = .;
+    .early_initcall : {
+        __early_initcall_start = .;
         QUAD(0);
-        KEEP(*(SORT_BY_NAME(.initcall.*)))
-        QUAD(0)
-        __initcall_end = .;
+        KEEP(*(SORT_BY_NAME(.early_initcall.*)))
+        QUAD(0);
+        __early_initcall_end = .;
+    } :rodata
+
+    .late_initcall : {
+        __late_initcall_start = .;
+        QUAD(0);
+        KEEP(*(SORT_BY_NAME(.late_initcall.*)))
+        QUAD(0);
+        __late_initcall_end = .;
     } :rodata
 
     . = ALIGN(8);

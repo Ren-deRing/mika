@@ -10,15 +10,23 @@
 #include <kernel/proc.h>
 #include <kernel/sched.h>
 #include <kernel/lock.h>
-
 #include "string.h"
+#include <kernel/exec.h>
+#include <kernel/fs/vfs.h>
+#include <uapi/fcntl.h>
 
 bool ap_release = false;
 
-void do_initcalls(void) {
-    for (initcall_t* call = __initcall_start; call < __initcall_end; call++) {
+static void do_early_initcalls(void) {
+    for (initcall_t* call = __early_initcall_start; call < __early_initcall_end; call++) {
         if (!call || !*call) continue;
-        
+        (*call)();
+    }
+}
+
+static void do_late_initcalls(void) {
+    for (initcall_t* call = __late_initcall_start; call < __late_initcall_end; call++) {
+        if (!call || !*call) continue;
         (*call)();
     }
 }
@@ -26,45 +34,12 @@ void do_initcalls(void) {
 void do_ap_initcalls(void) {
     for (initcall_t* call = __ap_initcall_start; call < __ap_initcall_end; call++) {
         if (!call || !*call) continue;
-        
         (*call)();
     }
 }
 
-// mutex_t test_mutex;
-// volatile int shared_counter = 0;
-
-// void mutex_test_thread(void* arg) {
-//     const char* name = (const char*)arg;
-    
-//     for (int i = 0; i < 5; i++) {
-//         dprintf("\n[%s] Locking mutex...\n", name);
-//         mutex_lock(&test_mutex);
-        
-//         dprintf("[%s] Counter: %d\n", name, ++shared_counter);
-//         dprintf("[%s] Anyway, this is critical code\n", name);
-
-//         thread_sleep(1000);
-        
-//         dprintf("[%s] Unlocking mutex...\n", name);
-//         mutex_unlock(&test_mutex);
-        
-//         thread_yield(); 
-//     }
-    
-//     dprintf("\n[%s] Test Finished!\n", name);
-//     for(;;) arch_halt();
-// }
-
-#include <kernel/exec.h>
-#include <kernel/fs/vfs.h>
-#include <uapi/fcntl.h>
-
-void generic_entry() {
-    arch_irq_disable();
-
-    early_init(g_boot_info.smp.bsp_hw_id);
-    do_initcalls();
+void generic_main(void) {
+    do_late_initcalls();
 
     ap_release = true;
     __sync_synchronize();
@@ -86,14 +61,7 @@ void generic_entry() {
         }
     }
 
-    // mutex_init(&test_mutex);
-    // shared_counter = 0;
-
-    // struct thread* t1 = thread_create(curthread->t_proc, 1, (void*)mutex_test_thread, "Mika_1");
-    // struct thread* t2 = thread_create(curthread->t_proc, 1, (void*)mutex_test_thread, "Mika_2");
-
-    // sched_enqueue(t1);
-    // sched_enqueue(t2);
+    extern void arch_enter_user_mode(uintptr_t entry, uintptr_t user_rsp);
 
     int fd;
     if (vfs_open("/bin/init", O_RDONLY, 0, &fd) == 0) {
@@ -106,31 +74,36 @@ void generic_entry() {
                 vfs_read(fd, elf_buf, size);
                 vfs_close(fd);
 
-                dprintf("Loading /bin/init (%d bytes)...\n", (int)size);
+                dprintf("Loading /bin/init...\n");
 
-                int err = proc_exec(curthread->t_proc, elf_buf);
-                
-                if (err == 0) {
+                int exec_ret = proc_exec(curthread->t_proc, elf_buf);
+                dprintf("proc_exec returned: %d\n", exec_ret);
+                if (exec_ret == 0) {
                     curthread->t_flags |= THREAD_FLAG_USER;
-                    
-                    arch_thread_setup(curthread, (void*)curthread->t_proc->p_entry);
-                    arch_switch_context_hardware(curthread);
+                    arch_set_kernel_stack((uintptr_t)curthread->t_kstack + KSTACK_SIZE);
 
-                    dprintf("Switching to User Mode...\n");
+                    arch_switch_mm(NULL, curthread->t_proc);
 
-                    dprintf("Entering User Mode...\n");
-                    dprintf("  RIP: 0x%lx\n", curthread->t_proc->p_entry);
-                    dprintf("  RSP: 0x%lx\n", curthread->t_proc->p_stack_top);
+                    dprintf("Entering User Mode: entry=%p stack=%p\n",
+                            (void*)curthread->t_proc->p_entry,
+                            (void*)curthread->t_proc->p_stack_top);
 
-                    extern void arch_enter_user_mode(void* context);
-                    arch_enter_user_mode(curthread->t_context);
-                    
+                    uintptr_t check = mmu_translate(curthread->t_proc->p_vm_map, 
+                                curthread->t_proc->p_entry);
+                    dprintf("mmu_translate(entry): paddr=%p\n", (void*)check);
+
+                    uintptr_t cr3;
+                    asm volatile ("mov %%cr3, %0" : "=r"(cr3));
+                    dprintf("CR3 after switch_mm: %p\n", (void*)cr3);
+
+                    arch_enter_user_mode(curthread->t_proc->p_entry,
+                                        curthread->t_proc->p_stack_top);
                 }
                 kfree(elf_buf);
             }
         }
     } else {
-        dprintf("Error: Cannot find /bin/init\n");
+        dprintf("Error: /bin/init not found\n");
     }
 
     arch_irq_enable();
@@ -139,6 +112,16 @@ void generic_entry() {
         arch_irq_enable();
         arch_halt();
     }
+}
+
+void generic_entry() {
+    arch_irq_disable();
+
+    early_init(g_boot_info.smp.bsp_hw_id);
+    do_early_initcalls();
+
+    extern void arch_start_thread(struct thread *t);
+    arch_start_thread(curcpu->idle);
 }
 
 void ap_entry(CoreInfo* info) {
@@ -152,16 +135,6 @@ void ap_entry(CoreInfo* info) {
 
     __sync_synchronize();
     do_ap_initcalls();
-
-    // arch_irq_enable();
-
-    // atomic_inc(&initialized_cores);
-
-    // if (info->hw_id == 1) {
-    //     volatile int a = 10;
-    //     volatile int b = 0;
-    //     volatile int c = a / b;
-    // }
 
     for (;;) arch_halt();
 }

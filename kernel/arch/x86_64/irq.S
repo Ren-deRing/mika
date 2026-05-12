@@ -1,5 +1,6 @@
 .global isr_common_stub
 .extern isr_handler
+.extern mi_switch
 
 .macro ISR_NOERRCODE num
 .global isr\num
@@ -65,6 +66,10 @@ i = 32
 .noaltmacro
 
 isr_common_stub:
+    testb $3, 24(%rsp)
+    jz .skip_swap
+    swapgs
+.skip_swap:
     pushq %rax
     pushq %rbx
     pushq %rcx
@@ -84,37 +89,15 @@ isr_common_stub:
     movq %rsp, %rdi
     call isr_handler
 
-    movq %gs:8, %rax
-    testq %rax, %rax
-    jz restore_and_exit
+    movq %gs:0, %rax
+    movq 32(%rax), %rax # rax = curthread
 
     cmpb $1, 64(%rax)
     jne restore_and_exit
 
-    # flag clear
     movb $0, 64(%rax)
+    call mi_switch
 
-    movq %rsp, 24(%rax)
-
-    movq 32(%rax), %rcx
-    movl $0xFFFFFFFF, %eax
-    movl $0xFFFFFFFF, %edx
-    xsaveopt (%rcx)
-
-    call pick_next_thread
-
-    movq %rax, %gs:8
-    movq %rax, %rsi    # rsi = next
-
-    movq 24(%rsi), %rsp
-
-    movq 32(%rsi), %rcx
-    movl $0xFFFFFFFF, %eax
-    movl $0xFFFFFFFF, %edx
-
-    xrstor (%rcx)
-
-.global restore_and_exit
 restore_and_exit:
     popq %r15
     popq %r14
@@ -133,6 +116,11 @@ restore_and_exit:
     popq %rax
 
     addq $16, %rsp
+
+    cmpq $0x1B, 8(%rsp)
+    jne .skip_swapgs
+    swapgs
+.skip_swapgs:
     iretq
 
 .section .data
@@ -157,5 +145,5 @@ isr_stub_table:
         isr_entry %i
         i = i + 1
     .endr
-
+    
 .noaltmacro

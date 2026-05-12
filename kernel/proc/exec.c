@@ -9,8 +9,9 @@
 
 int proc_exec(struct proc *p, void *elf_data) {
     uintptr_t entry_point = 0;
+    uintptr_t brk = 0;
     
-    page_table_t *new_map = load_elf(elf_data, &entry_point);
+    page_table_t *new_map = load_elf(elf_data, &entry_point, &brk);
     if (!new_map) {
         return -ENOEXEC;
     }
@@ -35,10 +36,10 @@ int proc_exec(struct proc *p, void *elf_data) {
     
     p->p_entry = entry_point;
     p->p_stack_top = stack_top;
+    p->p_brk = ALIGN_UP(brk, PAGE_SIZE);
 
-    struct thread *cur = this_core->current; 
-    if (cur && cur->t_proc == p) {
-        cur->t_user_stack_top = stack_top;
+    if (curthread && curthread->t_proc == p) {
+        curthread->t_user_stack_top = stack_top;
     }
 
     if (old_map && old_map != mmu_get_kernel_map()) {

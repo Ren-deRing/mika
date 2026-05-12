@@ -11,8 +11,8 @@ void spin_lock_init(spinlock_t *lock) {
 }
 
 void spin_lock(spinlock_t *lock) {
-    if (lock->holder_cpu == this_core->id && lock->now_serving != lock->next_ticket) {
-        dprintf("[Deadlock] Panic: CPU %d already holds this lock!\n", this_core->id);
+    if (lock->holder_cpu == curcpu->id && lock->now_serving != lock->next_ticket) {
+        dprintf("[Deadlock] Panic: CPU %d already holds this lock!\n", curcpu->id);
     }
 
     uint32_t ticket = __sync_fetch_and_add(&lock->next_ticket, 1);
@@ -22,7 +22,7 @@ void spin_lock(spinlock_t *lock) {
     }
 
     __sync_synchronize();
-    lock->holder_cpu = this_core->id;
+    lock->holder_cpu = curcpu->id;
 }
 
 void spin_unlock(spinlock_t *lock) {

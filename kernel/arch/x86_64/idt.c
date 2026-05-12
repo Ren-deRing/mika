@@ -1,6 +1,14 @@
 #include <kernel/init.h>
 #include <kernel/cpu.h>
 #include <kernel/printf.h>
+#include <kernel/proc.h>
+#include <kernel/mmu.h>
+
+static inline uintptr_t read_cr2(void) {
+    uintptr_t val;
+    asm volatile ("mov %%cr2, %0" : "=r"(val));
+    return val;
+} // TODO
 
 struct registers {
     uint64_t r15, r14, r13, r12, r11, r10, r9, r8;
@@ -58,23 +66,6 @@ void idt_set_descriptor(uint8_t vector, void* isr, uint8_t flags, uint8_t ist) {
     idt[vector].reserved   = 0;
 }
 
-void idt_install(void) {
-    for (int i = 0; i < 256; i++) {
-        uint8_t ist_index = (i == 8) ? 1 : 0;
-        if (i == 8 || i == 14) ist_index = 1;
-        idt_set_descriptor(i, (void*)isr_stub_table[i], 0x8E, ist_index);
-    }
-
-    idtr.limit = sizeof(idt) - 1;
-    idtr.base  = (uintptr_t)&idt;
-    
-    asm volatile ("lidt %0" : : "m"(idtr));
-}
-
-void ap_idt_install(void) {
-	asm volatile ("lidt %0" : : "m"(idtr));
-}
-
 const char* exceptions[32] = {
     "Divide-by-zero Error",
     "Debug",                          // 1
@@ -116,7 +107,44 @@ void panic(const char* description, struct registers *regs) {
     dprintf("RIP: %016llx  RSP: %016llx\n", regs->rip, regs->rsp);
     dprintf("CS: %02x  SS: %02x  RFLAGS: %08x\n", regs->cs, regs->ss, regs->rflags);
 
+    asm volatile ("outb %b0, %w1" : : "a"(1), "Nd"(0xf4));
     for (;;) arch_halt();
+}
+
+void page_fault_handler(struct registers *regs, void *data) {
+    uintptr_t fault_addr = read_cr2();
+    struct thread *thr = curthread;
+
+    if (thr && thr->t_kstack) {
+        uintptr_t stack_start = (uintptr_t)thr->t_kstack;
+        uintptr_t guard_page_start = stack_start - PAGE_SIZE;
+
+        if (fault_addr >= guard_page_start && fault_addr < stack_start) {
+            panic("Kernel Stack Overflow", regs);
+            return;
+        }
+    }
+    
+    panic(exceptions[14], regs);
+}
+
+void idt_install(void) {
+    for (int i = 0; i < 256; i++) {
+        uint8_t ist_index = (i == 8) ? 1 : 0;
+        if (i == 8 || i == 14) ist_index = 1;
+        idt_set_descriptor(i, (void*)isr_stub_table[i], 0x8E, ist_index);
+    }
+
+    register_handler(14, page_fault_handler, NULL);
+
+    idtr.limit = sizeof(idt) - 1;
+    idtr.base  = (uintptr_t)&idt;
+    
+    asm volatile ("lidt %0" : : "m"(idtr));
+}
+
+void ap_idt_install(void) {
+	asm volatile ("lidt %0" : : "m"(idtr));
 }
 
 static void isr_handler_inner(struct registers *regs) {
@@ -132,25 +160,10 @@ static void isr_handler_inner(struct registers *regs) {
             // ack_irq(vector - 32); 
         }
     }
-
-    // if (this_core->current == this_core->idle && can_switch()) {
-    //     switch_next();
-    // }
 }
 
 void isr_handler(struct registers *regs) {
-    // bool from_user = (regs->cs & 3) != 0;
-
-    // if (from_user && this_core->current) {
-    //     this_core->current->time_switch = arch_perf_timer();
-    // }
-
     isr_handler_inner(regs);
-
-    // if (from_user && this_core->current) {
-        // check_signals(regs);
-        // update_process_times();
-    // }
 }
 
 arch_initcall(idt_install, PRIO_SECOND);

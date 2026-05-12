@@ -4,20 +4,18 @@
 
 #include <uapi/types.h>
 
-struct arch_proc {
-    uintptr_t cr3;
+#define MSR_GS_BASE 0xC0000101
+#define MSR_KERNEL_GS_BASE 0xC0000102
+#define MSR_EFER 0xC0000080
+#define EFER_SCE (1ULL << 0)
+#define MSR_LSTAR 0xC0000082
+#define MSR_STAR  0xC0000081
+#define MSR_SFMASK 0xC0000084
 
+struct arch_proc {
     void *io_bitmap;
     uint32_t arch_flags;
 };
-
-struct x86_64_cpu_data {
-    uint64_t kernel_stack;
-    uint64_t user_rsp;
-    struct cpu *parent;
-};
-
-static struct x86_64_cpu_data static_arch_data[MAX_CPUS];
 
 extern uint8_t g_fpu_preset[4096];
 extern size_t g_xsave_size;

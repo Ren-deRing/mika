@@ -9,7 +9,12 @@ LC_CFLAGS := $(CFLAGS) -mcmodel=kernel -mno-red-zone \
 
 .PHONY: all clean
 
-all: $(LC_OBJS)
+all: $(OBJ_DIR)/libc/libc.a
+
+$(OBJ_DIR)/libc/libc.a: $(LC_OBJS)
+	@mkdir -p $(dir $@)
+	@echo "[AR] $@"
+	@$(AR) rcs $@ $^
 
 $(OBJ_DIR)/libc/%.o: %.c
 	@mkdir -p $(dir $@)

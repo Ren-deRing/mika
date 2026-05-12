@@ -33,6 +33,12 @@ void vprintf(const char* format, va_list args) {
     irq_restore(flags);
 }
 
+void kputc(char c) {
+    if (active_kprint_sink) {
+        active_kprint_sink(&c, NULL, 1);
+    }
+}
+
 void printf(const char* format, ...) {
     va_list args;
     va_start(args, format);

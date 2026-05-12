@@ -31,7 +31,7 @@ static inline uint32_t lapic_read(uint32_t reg) {
 }
 
 void x86_lapic_set_periodic(uint32_t ms, uint8_t vector) {
-    struct cpu* core = get_this_core();
+    struct cpu* core = curcpu;
     if (!core || !core->timer_ready) return;
 
     lapic_write(LAPIC_TDCR, 0x03);
@@ -47,8 +47,7 @@ void x86_lapic_set_periodic(uint32_t ms, uint8_t vector) {
 
 // Calibrate
 void x86_lapic_calibrate_timer(void) {
-    struct cpu* core = this_core;
-    if (!core) return;
+    if (!curcpu) return;
 
     lapic_write(LAPIC_TDCR, 0x03); 
 
@@ -59,8 +58,8 @@ void x86_lapic_calibrate_timer(void) {
     uint32_t current_tick = lapic_read(LAPIC_TCCR);
     uint32_t ticks_in_10ms = 0xFFFFFFFF - current_tick;
 
-    core->timer_ticks_per_ms = ticks_in_10ms / 10;
-    core->timer_ready = true;
+    curcpu->timer_ticks_per_ms = ticks_in_10ms / 10;
+    curcpu->timer_ready = true;
 }
 
 /* IPI */

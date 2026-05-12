@@ -10,6 +10,7 @@
 #include <kernel/init.h>
 #include <kernel/cpu.h>
 #include <kernel/lock.h>
+#include "kernel/printf.h"
 
 #include <string.h>
 
@@ -43,7 +44,7 @@ static int kmem_get_index(size_t size) {
 
     uint32_t leading_zeros = __builtin_clz((uint32_t)size - 1);
     int approximate_idx = 31 - leading_zeros;
-    
+
     for (int i = (approximate_idx > 0 ? approximate_idx : 0); i < KMEM_NUM_CLASSES; i++) {
         if (size <= kmem_class_sizes[i]) return i;
     }
@@ -60,7 +61,7 @@ static void* kmem_alloc_large(size_t size) {
 
     p->obj_size = 0;
     p->order = order;
-    
+
     return (void*)p2v(page_to_phys(p));
 }
 
@@ -76,10 +77,10 @@ static kmem_magazine_t* kmem_internal_mag_alloc(void) {
             spin_unlock_irqrestore(&mag_alloc_lock, flags);
             return NULL;
         }
-        
+
         kmem_magazine_t* batch = (kmem_magazine_t*)p2v(page_to_phys(p));
         int count = PAGE_SIZE / sizeof(kmem_magazine_t);
-        
+
         for (int i = 0; i < count - 1; i++) {
             batch[i].next = &batch[i+1];
         }
@@ -117,12 +118,12 @@ static kmem_magazine_t* kmem_get_empty_mag(int idx) {
 }
 
 static void kmem_magazine_swap_full(int idx) {
-    struct cpu* c = get_this_core();
+    struct cpu* c = curcpu;
     kmem_depot_t* d = &depots[idx];
     kmem_magazine_t* full_mag = c->magazines[idx];
 
     uint64_t flags = spin_lock_irqsave(&d->lock);
-    
+
     full_mag->next = d->full_mags;
     d->full_mags = full_mag;
     d->full_count++;
@@ -132,7 +133,7 @@ static void kmem_magazine_swap_full(int idx) {
         d->empty_mags = empty->next;
         d->empty_count--;
         spin_unlock_irqrestore(&d->lock, flags);
-        
+
         c->magazines[idx] = empty;
     } else {
         spin_unlock_irqrestore(&d->lock, flags);
@@ -189,7 +190,7 @@ static void* kmem_depot_refill(int idx) {
 }
 
 static void kmem_magazine_swap_empty(int idx) {
-    struct cpu* c = get_this_core();
+    struct cpu* c = curcpu;
     kmem_depot_t* d = &depots[idx];
     kmem_magazine_t* empty_mag = c->magazines[idx];
 
@@ -207,7 +208,7 @@ static void kmem_magazine_swap_empty(int idx) {
         spin_unlock_irqrestore(&d->lock, flags);
     } else {
         spin_unlock_irqrestore(&d->lock, flags);
-        
+
         kmem_magazine_t* new_mag = kmem_get_empty_mag(idx);
         for (int i = 0; i < KMEM_MAG_CAPACITY; i++) {
             void* obj = kmem_depot_refill(idx);
@@ -228,8 +229,8 @@ void* kmalloc(size_t size) {
     int idx = kmem_get_index(size);
     if (idx == -1) return NULL;
 
-    struct cpu* c = get_this_core();
-    
+    struct cpu* c = curcpu;
+
     if (!c->magazines[idx]) {
         c->magazines[idx] = kmem_get_empty_mag(idx);
     }
@@ -241,9 +242,9 @@ void* kmalloc(size_t size) {
     }
 
     kmem_magazine_swap_empty(idx);
-    
+
     mag = c->magazines[idx];
-    
+
     if (mag->top > 0) {
         return mag->slots[--mag->top];
     }
@@ -251,13 +252,11 @@ void* kmalloc(size_t size) {
     return NULL;
 }
 
-#include "kernel/printf.h"
-
 void kfree(void* ptr) {
     if (!ptr) return;
 
     page_t* page = phys_to_page(v2p(ptr));
-    
+
     if (page->obj_size == 0) {
         page_free(page, page->order);
         return;
@@ -266,12 +265,12 @@ void kfree(void* ptr) {
     __atomic_add_fetch(&page->free_count, 1, __ATOMIC_RELAXED);
 
     int idx = kmem_get_index(page->obj_size);
-    struct cpu* c = get_this_core();
+    struct cpu* c = curcpu;
 
     if (!c->magazines[idx]) {
         c->magazines[idx] = kmem_get_empty_mag(idx);
     }
-    
+
     kmem_magazine_t* mag = c->magazines[idx];
 
     if (mag->top < KMEM_MAG_CAPACITY) {
@@ -280,12 +279,13 @@ void kfree(void* ptr) {
     }
 
     kmem_magazine_swap_full(idx);
-    
+
     mag = c->magazines[idx];
     mag->slots[mag->top++] = ptr;
 }
 
 void* krealloc(void* ptr, size_t size) {
+    dprintf("krealloc: %p, size=%d\n", ptr, size);
     if (!ptr) return kmalloc(size);
     if (size == 0) {
         kfree(ptr);
@@ -293,7 +293,7 @@ void* krealloc(void* ptr, size_t size) {
     }
 
     page_t* page = phys_to_page(v2p(ptr));
-    
+
     size_t old_size = (page->obj_size == 0) ? 
                       (PAGE_SIZE << page->order) : page->obj_size;
 

@@ -7,7 +7,7 @@
 #include <kernel/kmem.h>
 #include <string.h>
 
-struct thread *curthread = NULL;
+extern void arch_context_switch(struct thread *prev, struct thread *next);
 
 static struct {
     spinlock_t lock;
@@ -48,84 +48,90 @@ struct thread* sched_dequeue(void) {
     return t;
 }
 
-struct thread* pick_next_thread(void) {
-    uint64_t flags = arch_irq_save();
+void mi_switch(void) {
+    cpu_status_t flags = arch_irq_save();
 
     struct thread *prev = curthread;
+    struct thread *next = sched_dequeue();
 
-    if (prev && prev->t_state == THREAD_RUNNING && prev->t_tid != 0) {
+    if (!next) {
+        next = curcpu->idle;
+    }
+
+    if (prev->t_state == THREAD_RUNNING && prev->t_tid != 0) {
         sched_enqueue(prev);
     }
 
-    struct thread *next = sched_dequeue();
-    if (!next) {
-        next = arch_get_idle_thread();
-    }
-
-    if (next->t_proc && next->t_proc->p_vm_map) {
-        arch_switch_context_hardware(next);
+    if (prev == next) {
+        arch_irq_restore(flags);
+        return;
     }
 
     next->t_state = THREAD_RUNNING;
-    curthread = next;
-    arch_set_current_thread(next);
+    curcpu->current_thread = next;
+
+    curcpu->tss_rsp0 = (uintptr_t)next->t_kstack + KSTACK_SIZE;
+
+    if (next->t_proc != prev->t_proc) {
+        arch_switch_mm(prev->t_proc, next->t_proc);
+    }
+
+    arch_context_switch(prev, next);
 
     arch_irq_restore(flags);
-    return next;
 }
 
 void schedule(void) {
     if (curthread) {
         curthread->t_need_resched = true;
-        arch_request_resched();
     }
 }
 
 void thread_yield(void) {
-    schedule();
+    mi_switch();
 }
 
 void thread_sleep(uint64_t ms) {
-    uint64_t flags = arch_irq_save();
+    cpu_status_t flags = arch_irq_save();
     
-    spin_lock(&sleep_queue.lock);
     curthread->t_sleep_until = arch_get_system_ticks() + ms;
     curthread->t_state = THREAD_SLEEP;
-    curthread->t_sched_next = sleep_queue.head;
-    sleep_queue.head = curthread;
+
+    spin_lock(&sleep_queue.lock);
+    if (!sleep_queue.head || curthread->t_sleep_until < sleep_queue.head->t_sleep_until) {
+        curthread->t_sched_next = sleep_queue.head;
+        sleep_queue.head = curthread;
+    } else {
+        struct thread *curr = sleep_queue.head;
+        while (curr->t_sched_next && curthread->t_sleep_until >= curr->t_sched_next->t_sleep_until) {
+            curr = curr->t_sched_next;
+        }
+        curthread->t_sched_next = curr->t_sched_next;
+        curr->t_sched_next = curthread;
+    }
     spin_unlock(&sleep_queue.lock);
     
     arch_irq_restore(flags);
 
-    schedule();
+    mi_switch();
 }
 
 void sched_tick(void) {
     uint64_t now = arch_get_system_ticks();
     
     spin_lock(&sleep_queue.lock);
-    struct thread *curr = sleep_queue.head;
-    struct thread *prev = NULL;
-    while (curr) {
-        struct thread *next = curr->t_sched_next;
-        if (now >= curr->t_sleep_until) {
-            if (prev) prev->t_sched_next = next;
-            else sleep_queue.head = next;
-            
-            sched_enqueue(curr);
-        } else {
-            prev = curr;
-        }
-        curr = next;
+    while (sleep_queue.head && now >= sleep_queue.head->t_sleep_until) {
+        struct thread *t = sleep_queue.head;
+        sleep_queue.head = t->t_sched_next;
+        sched_enqueue(t);
     }
     spin_unlock(&sleep_queue.lock);
 
-    if (curthread) {
+    if (curthread && curthread->t_tid != 0) {
         curthread->t_ticks++;
         if (curthread->t_ticks >= 10) {
             curthread->t_ticks = 0;
-            curthread->t_need_resched = true;
-            arch_request_resched();
+            schedule();
         }
     }
 }
@@ -134,10 +140,11 @@ void scheduler_init(void) {
     spin_lock_init(&ready_queue.lock);
     spin_lock_init(&sleep_queue.lock);
 
-    curthread = arch_init_first_thread();
+    arch_init_first_thread();
+    // noreturn
 
-    g_intc->register_handler(0x40, arch_timer_handler, NULL);
-    g_intc->start_timer(1, 0x40);
+    // g_intc->register_handler(0x40, arch_timer_handler, NULL);
+    // g_intc->start_timer(1, 0x40);
 }
 
 dev_initcall(scheduler_init, PRIO_LAST);

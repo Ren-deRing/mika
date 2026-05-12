@@ -83,7 +83,7 @@ iso: all
 		cp -rv $(USER_BIN_DIR)/* $(INITRD_TEMP)/bin/ 2>/dev/null || true; \
 	fi
 
-	@cd $(INITRD_TEMP) && find . | cpio -o -H newc > $(INITRD_IMG)
+	@cd $(INITRD_TEMP) && find . -mindepth 1 | cpio -o -H newc > $(INITRD_IMG)
 
 	@cp -v $(BIN_DIR)/$(OUTPUT) $(ISO_ROOT)/boot/
 	@cp -v $(BASE_DIR)/limine.conf $(ISO_ROOT)/boot/limine/
@@ -107,8 +107,9 @@ run: iso
 	qemu-system-x86_64 \
 		-cdrom $(ISO_IMAGE) \
 		-m 8G \
+		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
 		-bios /usr/share/ovmf/OVMF.fd \
-		-serial stdio -d int -smp 4 -machine q35 -cpu host -accel kvm
+		-serial stdio -d int,cpu_reset -smp 4 -accel kvm -cpu host
 
 clean:
 	rm -rf $(BUILD_DIR) $(BIN_DIR)

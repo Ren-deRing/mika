@@ -10,14 +10,6 @@
 #include <kernel/init.h>
 #include <kernel/printf.h>
 
-#define MSR_GS_BASE 0xC0000101
-#define MSR_KERNEL_GS_BASE 0xC0000102
-#define MSR_EFER 0xC0000080
-#define EFER_SCE (1ULL << 0)
-#define MSR_LSTAR 0xC0000082
-#define MSR_STAR  0xC0000081
-#define MSR_SFMASK 0xC0000084
-
 #define SERIAL_DEVICE 0x3F8
 
 struct cpu cpus[MAX_CPUS];
@@ -43,21 +35,6 @@ void fpu_init(void) {
 
     uint32_t mxcsr = 0x1F80;
     asm volatile ("ldmxcsr %0" : : "m"(mxcsr));
-}
-
-extern void syscall_entry(void);
-void syscall_init(void) {
-    uint64_t efer = rdmsr(MSR_EFER);
-    efer |= EFER_SCE;
-    wrmsr(MSR_EFER, efer);
-
-    wrmsr(MSR_LSTAR, (uintptr_t)syscall_entry);
-
-    uint64_t star = (uint64_t)0x08 << 32;
-    star |= (uint64_t)0x1B << 48;
-    wrmsr(MSR_STAR, star);
-
-    wrmsr(MSR_SFMASK, 0x200);
 }
 
 void xsave_init(void) {
@@ -91,18 +68,27 @@ void xsave_init(void) {
               : "memory");
 }
 
+extern void syscall_entry(void);
+
+void syscall_init(void) {
+    uint64_t efer = rdmsr(MSR_EFER);
+    efer |= EFER_SCE;
+    wrmsr(MSR_EFER, efer);
+
+    wrmsr(MSR_LSTAR, (uintptr_t)syscall_entry);
+
+    uint64_t star = ((uint64_t)0x08 << 32) | ((uint64_t)0x1B << 48);
+    wrmsr(MSR_STAR, star);
+
+    wrmsr(MSR_SFMASK, 0x200);
+}
+
 void cpu_init(uint32_t logic_id, uint32_t hw_id) {
     struct cpu *c = &cpus[logic_id];
-    
-    struct x86_64_cpu_data *ad = &static_arch_data[logic_id];
-    
-    ad->kernel_stack = 0; 
-    ad->user_rsp = 0;
 
     c->self = c;
     c->id = logic_id;
     c->hw_id = hw_id;
-    c->arch_cpu_data = ad;
 
     for (int i = 0; i < KMEM_NUM_CLASSES; i++) {
         c->magazines[i] = NULL; 
@@ -126,12 +112,16 @@ static void log_init(void) {
     set_output_sink(&log_write);
 }
 
+#include <kernel/version.h>
+
 void early_init(uint32_t hw_id) {
     fpu_init();
     cpu_init(0, hw_id);
     log_init();
     xsave_init();
     syscall_init();
+
+    dprintf("%s [%s]\n", __kernel_name, __kernel_version_codename);
 }
 
 static volatile int next_id = 1;

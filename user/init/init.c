@@ -1,20 +1,16 @@
 #include <stdint.h>
-
-static inline int64_t syscall1(uint64_t num, uint64_t a1) {
-    int64_t ret;
-    __asm__ volatile (
-        "syscall"
-        : "=a"(ret)
-        : "a"(num), "D"(a1)
-        : "rcx", "r11", "memory"
-    );
-    return ret;
-}
+#include <sys/syscall.h>
 
 void _start() {
-    syscall1(1, 0x1234);
+    // syscall 0: test
+    int64_t result = syscall(0, 0xDEADBEEF, 0, 0);
 
-    for (;;) {
-        __asm__ volatile ("pause");
-    }
+    // syscall 1: write(fd=1, buf, len)
+    const char *msg = "Hello from userspace!\n";
+    uint64_t len = 0;
+    while (msg[len]) len++;
+
+    syscall(1, 1, (uint64_t)msg, len);
+
+    while (1);
 }

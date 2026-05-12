@@ -8,6 +8,11 @@
 #define MAX_CPUS 64
 #define MAX_ISO 256
 
+#define KSTACK_SIZE 8192
+#define KSTACK_MASK (~(KSTACK_SIZE - 1))
+
+extern uint8_t boot_stack[];
+
 #define KMEM_NUM_CLASSES 16
 
 struct kmem_magazine;
@@ -17,8 +22,13 @@ typedef uint64_t cpu_status_t;
 
 struct cpu {
     struct cpu *self;
-    struct thread *current;   // running task
-    struct thread *idle;      // idle task
+
+    uint64_t tss_rsp0;
+    uint64_t user_rsp;
+
+    struct thread *idle;
+    struct thread *current_thread;
+
     uint32_t id;
     uint32_t hw_id;
 
@@ -45,18 +55,19 @@ struct cpu* get_this_core(void);
 
 void arch_timer_handler(struct registers *regs, void *data);
 void arch_thread_setup(struct thread *t, void (*entry)(void));
+
 struct thread* arch_init_first_thread(void);
 void arch_set_current_thread(struct thread *t);
-struct thread* arch_get_idle_thread(void);
+
 uint64_t arch_get_system_ticks(void);
-void arch_request_resched(void);
+
 int arch_proc_init(struct proc *p);
 void arch_proc_destroy(struct proc *p);
-int arch_thread_init(struct thread *t, void (*entry)(void));
+int arch_thread_init(struct thread *t);
 void arch_thread_destroy(struct thread *t);
-void arch_switch_context_hardware(struct thread *next);
+void arch_set_kernel_stack(uintptr_t kstack_top);
+void arch_switch_mm(struct proc *prev, struct proc *next);
 
-#define this_core          get_this_core()
 #define irq_save(flags)    do { flags = arch_irq_save(); } while(0)
 #define irq_restore(flags) arch_irq_restore(flags)
 #define irq_enable(void)   arch_irq_enable();
@@ -71,6 +82,10 @@ static inline uintptr_t get_stack_pointer(void) {
 #endif
     return sp;
 }
+
+#define curcpu    get_this_core()
+#define curthread (curcpu->current_thread)
+#define curproc   (curthread ? curthread->t_proc : NULL)
 
 #include <kernel/proc.h>
 
