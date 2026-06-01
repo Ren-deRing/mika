@@ -84,7 +84,7 @@ void generic_main(void) {
         arch_halt();
     }
 }
-
+ 
 void generic_entry() {
     arch_irq_disable();
 
