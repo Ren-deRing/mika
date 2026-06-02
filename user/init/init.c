@@ -3,6 +3,11 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <stdlib.h>
+#include <signal.h>
+
+void sigusr1_handler(int sig) {
+    printf("[CHILD] Handler: oh signal %d! Back to you, parent.\n", sig);
+}
 
 int main(int argc, char *argv[]) {
     printf("Hello MUSL!\n");
@@ -19,28 +24,53 @@ int main(int argc, char *argv[]) {
     } 
     else if (pid == 0) {
         pid_t child_pid = getpid();
-        printf("[CHILD] fork() returned: %d\n", pid);
         printf("[CHILD] My actual getpid() is: %d\n", child_pid);
+
+        struct sigaction sa;
+        sa.sa_handler = sigusr1_handler;
+        sigemptyset(&sa.sa_mask);
+        sa.sa_flags = 0;
+        sa.sa_restorer = NULL;
+
+        if (sigaction(SIGUSR1, &sa, NULL) < 0) {
+            perror("[CHILD] sigaction failed");
+            exit(1);
+        }
+        printf("[CHILD] SIGUSR1 handler registered!\n");
         
-        for (int i = 1; i <= 3; i++) {
-            printf("[CHILD] Loop count: %d\n", i);
+        printf("[CHILD] Waiting for parent's signal...\n");
+        for (int i = 0; i < 10; i++) {
+            for (volatile int j = 0; j < 20000000; j++);
+            printf("[CHILD] I'm still alive (Loop %d)...\n", i);
         }
 
-        printf("[CHILD] Now calling execve(\"/bin/hello\", ...)\n");
-        char *child_argv[] = {"/bin/hello", "hello_arg1", "hello_arg2", NULL};
-        char *child_envp[] = {"PATH=/bin", "USER=heebb", "SHELL=/bin/sh", NULL};
-
-        execve("/bin/hello", child_argv, child_envp);
-
-        perror("[CHILD] execve FAILED");
-        exit(1);
+        exit(0);
     } 
     else {
         printf("[PARENT] fork() returned (Child PID): %d\n", pid);
         
-        for (volatile unsigned long long i = 0; i < 40000000ULL; i++);
+        for (volatile int j = 0; j < 30000000; j++);
+        
+        printf("[PARENT] Sending SIGUSR1 (10) to Child...\n");
+        kill(pid, SIGUSR1);
 
-        printf("[PARENT] 에이 뭐 대충 지금쯤 자식 끝났겠죠? 나중에합시다\n");
+        for (volatile int j = 0; j < 50000000; j++);
+
+        printf("[PARENT] Now sending SIGTERM (15) to Child...\n");
+        kill(pid, SIGTERM);
+
+        int status = 0;
+        printf("[PARENT] Waiting for child via waitpid...\n");
+        waitpid(pid, &status, 0);
+
+        printf("[PARENT] Child raw exit status: %X\n", status);
+        if (WIFEXITED(status)) {
+            printf("[PARENT] Child exited normally with status: %d\n", WEXITSTATUS(status));
+        } else if (WIFSIGNALED(status)) {
+            printf("[PARENT] Child was terminated by signal: %d\n", WTERMSIG(status));
+        } else {
+            printf("[PARENT] Child terminated.\n");
+        }
     }
 
     return 0;

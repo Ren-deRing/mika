@@ -20,6 +20,7 @@ struct thread* arch_init_first_thread(void) {
     t0->t_kstack = new_stack;
     t0->t_tid = 0;
     t0->t_proc = p0;
+    p0->p_threads = t0;
     t0->t_state = THREAD_RUNNING;
     t0->t_fs_base = 0;
     

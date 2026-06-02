@@ -51,24 +51,26 @@ void mutex_init(mutex_t *m) {
 }
 
 void mutex_lock(mutex_t *m) {
-    uint64_t flags = spin_lock_irqsave(&m->wait_lock);
+    uint64_t flags;
 
-    while (m->locked) {
+    while (1) {
+        flags = spin_lock_irqsave(&m->wait_lock);
+
+        if (!m->locked) {
+            m->locked = 1;
+            m->owner = curthread;
+            spin_unlock_irqrestore(&m->wait_lock, flags);
+            break;
+        }
+
         struct thread *t = curthread;
-        
         t->t_state = THREAD_WAITING;
         t->t_lock_to_release = &m->wait_lock;
         list_add_tail(&t->t_wait_node, &m->wait_queue);
 
-        spin_unlock_irqrestore(&m->wait_lock, flags);
+        arch_irq_restore(flags);
         thread_yield();
-
-        flags = spin_lock_irqsave(&m->wait_lock);
     }
-
-    m->locked = 1;
-    m->owner = curthread;
-    spin_unlock_irqrestore(&m->wait_lock, flags);
 }
 
 void mutex_unlock(mutex_t *m) {

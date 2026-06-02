@@ -99,32 +99,60 @@ int64_t sys_write(int fd, const void *user_buf, size_t count) {
     return (int64_t)vfs_write(fd, user_buf, count);
 }
 
-int64_t sys_writev(int fd, const struct iovec *user_iov, int iovcnt) {
+int64_t sys_writev(int fd, const void *user_iov, int iovcnt) {
     if (fd < 0 || fd >= MAX_FILES) return -EBADF;
     if (iovcnt <= 0 || iovcnt > 1024) return -EINVAL;
 
-    struct { void *base; size_t len; } kiov[iovcnt];
-    if (copy_from_user(kiov, user_iov, iovcnt * sizeof(kiov[0])) < 0)
+    typedef struct { void *base; size_t len; } kiov_t;
+
+    if (!is_user_address_range(user_iov, iovcnt * sizeof(kiov_t))) {
         return -EFAULT;
+    }
+
+    kiov_t *kiov = kmalloc(iovcnt * sizeof(kiov_t));
+    if (!kiov) return -ENOMEM;
+
+    if (copy_from_user(kiov, user_iov, iovcnt * sizeof(kiov_t)) < 0) {
+        kfree(kiov);
+        return -EFAULT;
+    }
 
     int64_t total = 0;
     for (int i = 0; i < iovcnt; i++) {
         if (kiov[i].len == 0) continue;
         int64_t r = sys_write(fd, kiov[i].base, kiov[i].len);
-        if (r < 0) return total > 0 ? total : r;
+        if (r < 0) {
+            kfree(kiov);
+            return total > 0 ? total : r;
+        }
         total += r;
     }
+
+    kfree(kiov);
     return total;
 }
 
 int64_t sys_exit(int64_t status) {
     cpu_status_t flags = arch_irq_save();
 
-    curthread->t_state = THREAD_ZOMBIE; 
+    curproc->p_exit_status = (int)status;
     curproc->p_state = PROC_ZOMBIE;
+    curthread->t_state = THREAD_ZOMBIE; 
     curthread->t_need_resched = true;
 
-    return 0; 
+    struct proc *parent = curproc->p_parent;
+    if (parent) {
+        spin_lock(&parent->p_lock);
+        while (!list_empty(&parent->p_wait_queue)) {
+            struct thread *waiter = list_first_entry(&parent->p_wait_queue, struct thread, t_wait_node);
+            list_del(&waiter->t_wait_node);
+            waiter->t_state = THREAD_READY;
+            sched_enqueue(waiter);
+        }
+        spin_unlock(&parent->p_lock);
+    }
+
+    mi_switch();
 }
 
 int64_t sys_mmap(uintptr_t addr, size_t length, int prot, int flags, int fd, int64_t offset) {
@@ -282,62 +310,66 @@ int sys_fork(void) {
         vref(parent_p->p_cwd);
     }
 
-    spin_lock(&parent_p->p_lock);
+    uint64_t lock_flags = spin_lock_irqsave(&parent_p->p_lock);
     for (int i = 0; i < MAX_FILES; i++) {
         if (parent_p->p_fd_table[i] != NULL) {
             child_p->p_fd_table[i] = parent_p->p_fd_table[i];
-            
             child_p->p_fd_table[i]->f_refcnt++; 
         } else {
             child_p->p_fd_table[i] = NULL;
         }
     }
-    spin_unlock(&parent_p->p_lock);
+    spin_unlock_irqrestore(&parent_p->p_lock, lock_flags);
 
     child_p->p_vm_map = mmu_clone_map(parent_p->p_vm_map);
     if (!child_p->p_vm_map) {
-        return -ENOMEM;
+        goto err_proc;
     }
     child_p->p_entry = parent_p->p_entry;
     child_p->p_stack_top = parent_p->p_stack_top;
     child_p->p_brk = parent_p->p_brk;
     child_p->p_mmap_base = parent_p->p_mmap_base;
 
-    uintptr_t user_rsp = parent_t->t_trapframe->rsp;
-    uintptr_t parent_paddr = mmu_translate(parent_p->p_vm_map, user_rsp);
-    uintptr_t child_paddr = mmu_translate(child_p->p_vm_map, user_rsp);
-
     struct thread *child_t = kmalloc_aligned(sizeof(struct thread), 64);
     if (!child_t) {
-        // TODO: 자원 해제
-        return -ENOMEM;
+        goto err_vm_map;
     }
     memset(child_t, 0, sizeof(struct thread));
 
     void *child_stack = kmalloc_aligned(KSTACK_SIZE, KSTACK_SIZE);
     if (!child_stack) {
-        // TODO: 자원 해제
-        return -ENOMEM;
+        goto err_thread;
     }
     child_t->t_kstack = child_stack;
 
     int err = arch_thread_fork(child_t, parent_t);
     if (err < 0) {
-        // 청소 로직
-        return err;
+        goto err_stack;
     }
 
     child_t->t_tid = next_tid++;
     child_t->t_proc = child_p;
+    child_p->p_threads = child_t;
     child_t->t_state = THREAD_READY;
     child_t->t_flags = parent_t->t_flags;
     
-    spin_lock(&parent_p->p_lock);
+    uint64_t lock_flags2 = spin_lock_irqsave(&parent_p->p_lock);
     list_add_tail(&child_p->p_child_link, &parent_p->p_children);
-    spin_unlock(&parent_p->p_lock);
+    spin_unlock_irqrestore(&parent_p->p_lock, lock_flags2);
 
     sched_enqueue(child_t);
     return child_p->p_pid;
+
+err_stack:
+    kfree_aligned(child_stack);
+err_thread:
+    kfree_aligned(child_t);
+err_vm_map:
+    mmu_destroy_map(child_p->p_vm_map);
+    child_p->p_vm_map = NULL;
+err_proc:
+    proc_put(child_p);
+    return -ENOMEM;
 }
 
 int64_t sys_mprotect(uintptr_t start, size_t len, int prot) {
@@ -486,6 +518,76 @@ int64_t sys_execve(const char *user_path, char *const argv[], char *const envp[]
     return curthread->t_trapframe->rax; 
 }
 
+int64_t sys_wait4(pid_t pid, int *user_wstatus, int options, void *user_rusage) {
+    (void)user_rusage;
+    struct proc *parent = curproc;
+
+    while (1) {
+        uint64_t flags = spin_lock_irqsave(&parent->p_lock);
+
+        if (list_empty(&parent->p_children)) {
+            spin_unlock_irqrestore(&parent->p_lock, flags);
+            return -ECHILD;
+        }
+
+        struct proc *found_child = NULL;
+        bool has_living_child = false;
+
+        struct proc *child;
+        list_for_each_entry(child, &parent->p_children, p_child_link) {
+            if (pid == -1 || child->p_pid == pid) {
+                if (child->p_state == PROC_ZOMBIE) {
+                    found_child = child;
+                    break;
+                }
+                has_living_child = true;
+            }
+        }
+
+        if (found_child) {
+            pid_t child_pid = found_child->p_pid;
+            int exit_status = found_child->p_exit_status;
+
+            if (user_wstatus != NULL) {
+                if (!is_user_address_range(user_wstatus, sizeof(int))) {
+                    spin_unlock_irqrestore(&parent->p_lock, flags);
+                    return -EFAULT;
+                }
+                int wstatus_val = (exit_status & 0xff) << 8;
+                if (copy_to_user(user_wstatus, &wstatus_val, sizeof(int)) < 0) {
+                    spin_unlock_irqrestore(&parent->p_lock, flags);
+                    return -EFAULT;
+                }
+            }
+
+            list_del(&found_child->p_child_link);
+            spin_unlock_irqrestore(&parent->p_lock, flags);
+
+            proc_put(found_child);
+
+            return child_pid;
+        }
+
+        if (!has_living_child) {
+            spin_unlock_irqrestore(&parent->p_lock, flags);
+            return -ECHILD;
+        }
+
+        if (options & 1) {
+            spin_unlock_irqrestore(&parent->p_lock, flags);
+            return 0;
+        }
+
+        struct thread *t = curthread;
+        t->t_state = THREAD_WAITING;
+        t->t_lock_to_release = &parent->p_lock;
+        list_add_tail(&t->t_wait_node, &parent->p_wait_queue);
+
+        arch_irq_restore(flags);
+        thread_yield();
+    }
+}
+
 int64_t sys_fstat(int fd, struct stat *user_statbuf) {
     if (fd < 0 || fd >= MAX_FILES) return -EBADF;
     if (!is_user_address_range(user_statbuf, sizeof(struct stat))) return -EFAULT;
@@ -587,10 +689,186 @@ int64_t sys_clock_gettime(int clk_id, void *user_tp) {
     return 0;
 }
 
+void handle_signal_dispatch(struct trapframe *tf, int sig, struct sigaction *act) {
+    uintptr_t user_rsp = tf->rsp;
+
+    uintptr_t frame_addr = (user_rsp - sizeof(struct sigframe)) & ~0xF;
+
+    struct sigframe frame;
+    memset(&frame, 0, sizeof(struct sigframe));
+
+    memcpy(&frame.sf_tf, tf, sizeof(struct trapframe));
+    frame.sf_oldmask = curthread->t_sig_mask;
+
+    // 트램폴린 준비 (mov rax, 15; syscall)
+    frame.sf_trampoline[0] = 0x48; // mov rax, 15
+    frame.sf_trampoline[1] = 0xc7;
+    frame.sf_trampoline[2] = 0xc0;
+    frame.sf_trampoline[3] = 0x0f;
+    frame.sf_trampoline[4] = 0x00;
+    frame.sf_trampoline[5] = 0x00;
+    frame.sf_trampoline[6] = 0x00;
+    frame.sf_trampoline[7] = 0x0f; // syscall
+    frame.sf_trampoline[8] = 0x05;
+
+    if (copy_to_user((void *)frame_addr, &frame, sizeof(struct sigframe)) < 0) {
+        sys_exit(128 + SIGSEGV);
+        return;
+    }
+
+    tf->rip = (uintptr_t)act->sa_handler;
+    tf->rdi = (uint64_t)sig;
+    tf->rsp = frame_addr;
+
+    uintptr_t ret_addr = act->sa_restorer ? (uintptr_t)act->sa_restorer : (frame_addr + offsetof(struct sigframe, sf_trampoline));
+    tf->rsp -= 8;
+    if (copy_to_user((void *)tf->rsp, &ret_addr, sizeof(uintptr_t)) < 0) {
+        sys_exit(128 + SIGSEGV);
+        return;
+    }
+
+    curthread->t_sig_mask |= act->sa_mask;
+    curthread->t_in_sighandler = true;
+
+    curthread->t_sig_pending &= ~(1ULL << (sig - 1));
+}
+
+void check_signals(struct trapframe *tf) {
+    if (!curthread || !curthread->t_proc) return;
+    if (curthread->t_tid == 0) return;
+
+    if ((tf->cs & 3) != 3) {
+        return;
+    }
+
+    uint64_t flags = spin_lock_irqsave(&curthread->t_proc->p_lock);
+
+    uint64_t pending = curthread->t_sig_pending & ~curthread->t_sig_mask;
+    if (pending == 0) {
+        spin_unlock_irqrestore(&curthread->t_proc->p_lock, flags);
+        return;
+    }
+
+    int sig = 0;
+    for (int i = 0; i < NSIG; i++) {
+        if (pending & (1ULL << i)) {
+            sig = i + 1;
+            break;
+        }
+    }
+
+    if (sig == 0) {
+        spin_unlock_irqrestore(&curthread->t_proc->p_lock, flags);
+        return;
+    }
+
+    struct sigaction act = curthread->t_sig_actions[sig - 1];
+
+    if (act.sa_handler == SIG_DFL) {
+        if (sig == SIGKILL || sig == SIGTERM || sig == SIGINT || sig == SIGQUIT || sig == SIGHUP || 
+            sig == SIGSEGV || sig == SIGILL || sig == SIGFPE || sig == SIGBUS || sig == SIGABRT) {
+            
+            spin_unlock_irqrestore(&curthread->t_proc->p_lock, flags);
+            dprintf("[SIGNAL] Process %d killed by signal %d\n", curthread->t_proc->p_pid, sig);
+            sys_exit(128 + sig);
+            return;
+        }
+        curthread->t_sig_pending &= ~(1ULL << (sig - 1));
+        spin_unlock_irqrestore(&curthread->t_proc->p_lock, flags);
+        return;
+    } else if (act.sa_handler == SIG_IGN) {
+        curthread->t_sig_pending &= ~(1ULL << (sig - 1));
+        spin_unlock_irqrestore(&curthread->t_proc->p_lock, flags);
+        return;
+    } else {
+        spin_unlock_irqrestore(&curthread->t_proc->p_lock, flags);
+        handle_signal_dispatch(tf, sig, &act);
+        return;
+    }
+}
+
 int64_t sys_rt_sigaction(int sig, const void *act, void *oact, size_t sigsetsize) {
-    (void)sig; (void)act; (void)oact; (void)sigsetsize;
+    if (sig < 1 || sig >= NSIG) {
+        return -EINVAL;
+    }
+    if (sigsetsize != sizeof(sigset_t)) {
+        return -EINVAL;
+    }
+    if (sig == SIGKILL || sig == SIGSTOP) {
+        return -EINVAL;
+    }
+
+    if (oact) {
+        if (!is_user_address_range(oact, sizeof(struct sigaction))) {
+            return -EFAULT;
+        }
+        if (copy_to_user(oact, &curthread->t_sig_actions[sig - 1], sizeof(struct sigaction)) < 0) {
+            return -EFAULT;
+        }
+    }
+
+    if (act) {
+        if (!is_user_address_range(act, sizeof(struct sigaction))) {
+            return -EFAULT;
+        }
+        struct sigaction new_act;
+        if (copy_from_user(&new_act, act, sizeof(struct sigaction)) < 0) {
+            return -EFAULT;
+        }
+        curthread->t_sig_actions[sig - 1] = new_act;
+    }
+
     return 0;
 }
+
+int64_t sys_rt_sigreturn(void) {
+    uintptr_t frame_addr = curthread->t_trapframe->rsp;
+
+    struct sigframe frame;
+    if (copy_from_user(&frame, (void *)frame_addr, sizeof(struct sigframe)) < 0) {
+        sys_exit(128 + SIGSEGV);
+        return -EFAULT;
+    }
+
+    if ((frame.sf_tf.cs & 3) != 3 || (frame.sf_tf.ss & 3) != 3) {
+        dprintf("Attempted privilege escalation via sigreturn! PID: %d\n", curthread->t_proc->p_pid);
+        sys_exit(128 + SIGSEGV);
+        return -EPERM;
+    }
+
+    memcpy(curthread->t_trapframe, &frame.sf_tf, sizeof(struct trapframe));
+    curthread->t_sig_mask = frame.sf_oldmask;
+    curthread->t_in_sighandler = false;
+
+    return curthread->t_trapframe->rax;
+}
+
+int64_t sys_kill(pid_t pid, int sig) {
+    if (sig < 1 || sig >= NSIG) {
+        return -EINVAL;
+    }
+
+    struct proc *p = find_proc(pid);
+    if (!p) {
+        return -ESRCH;
+    }
+
+    struct thread *t = p->p_threads;
+    if (!t) {
+        proc_put(p);
+        return -ESRCH;
+    }
+
+    uint64_t flags = spin_lock_irqsave(&p->p_lock);
+    t->t_sig_pending |= (1ULL << (sig - 1));
+    spin_unlock_irqrestore(&p->p_lock, flags);
+
+    thread_signal_wakeup(t);
+
+    proc_put(p);
+    return 0;
+}
+
 
 int64_t sys_rt_sigprocmask(int how, const void *set, void *oset, size_t sigsetsize) {
     (void)how; (void)set; (void)sigsetsize;
@@ -613,12 +891,15 @@ static syscall_t syscall_table[] = {
     [12] = (syscall_t)sys_brk,
     [13] = (syscall_t)sys_rt_sigaction,
     [14] = (syscall_t)sys_rt_sigprocmask,
+    [15] = (syscall_t)sys_rt_sigreturn,
     [16] = (syscall_t)sys_ioctl,
     [20] = (syscall_t)sys_writev,
     [39] = (syscall_t)sys_getpid,
     [57] = (syscall_t)sys_fork,
     [59] = (syscall_t)sys_execve,
     [60] = (syscall_t)sys_exit,
+    [61] = (syscall_t)sys_wait4,
+    [62] = (syscall_t)sys_kill,
     // [63]  = (syscall_t)sys_uname,
     [97]  = (syscall_t)sys_getrlimit,
     [158] = (syscall_t)sys_arch_prctl,
@@ -649,6 +930,8 @@ int64_t do_syscall_handler(struct trapframe *tf) {
         syscall_table[num](a1, a2, a3, a4, a5, 0);
 
     tf->rax = ret;
+
+    check_signals(tf);
 
     return ret;
 }

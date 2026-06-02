@@ -5,6 +5,8 @@
 #include <kernel/init.h>
 #include <kernel/lock.h>
 #include <kernel/sched.h>
+#include <kernel/mmu.h>
+#include <kernel/list.h>
 
 #include <uapi/errno.h>
 
@@ -12,6 +14,10 @@
 
 pid_t next_pid = 1;
 tid_t next_tid = 1;
+
+LIST_HEAD(g_proc_list);
+spinlock_t g_proc_list_lock = SPINLOCK_INITIALIZER;
+
 
 struct thread* thread_create(struct proc *p, tid_t tid, void (*entry)(void *), void *arg) {
     struct thread *t = kmalloc(sizeof(struct thread));
@@ -27,6 +33,9 @@ struct thread* thread_create(struct proc *p, tid_t tid, void (*entry)(void *), v
 
     t->t_tid = tid;
     t->t_proc = p;
+    if (!p->p_threads) {
+        p->p_threads = t;
+    }
     t->t_state = THREAD_READY;
     t->t_ticks = 0;
     t->t_need_resched = false;
@@ -53,6 +62,11 @@ void proc_free(struct proc *p) {
         }
     }
 
+    if (p->p_vm_map && p->p_pid != 0) {
+        mmu_destroy_map(p->p_vm_map);
+        p->p_vm_map = NULL;
+    }
+
     arch_proc_destroy(p);
 
     if (p->p_cwd) {
@@ -71,6 +85,9 @@ struct proc* proc_create(pid_t pid) {
     spin_lock_init(&p->p_lock);
 
     list_init(&p->p_children);
+    list_init(&p->p_wait_queue);
+    p->p_exit_status = 0;
+    p->p_refcnt = 1;
 
     p->p_mmap_base = 0x400000000000;
 
@@ -95,6 +112,10 @@ struct proc* proc_create(pid_t pid) {
         p->p_cwd = g_root_vnode;
     }
 
+    uint64_t flags = spin_lock_irqsave(&g_proc_list_lock);
+    list_add_tail(&p->p_list_link, &g_proc_list);
+    spin_unlock_irqrestore(&g_proc_list_lock, flags);
+
     return p;
 }
 
@@ -112,4 +133,42 @@ int proc_alloc_fd(struct proc *p, struct file *f) {
     spin_unlock(&p->p_lock);
 
     return -EMFILE; // 빈자리가 없음!!
+}
+
+void proc_ref(struct proc *p) {
+    if (!p) return;
+    uint64_t flags = spin_lock_irqsave(&p->p_lock);
+    p->p_refcnt++;
+    spin_unlock_irqrestore(&p->p_lock, flags);
+}
+
+void proc_put(struct proc *p) {
+    if (!p) return;
+    uint64_t flags = spin_lock_irqsave(&p->p_lock);
+    p->p_refcnt--;
+    bool should_free = (p->p_refcnt == 0);
+    spin_unlock_irqrestore(&p->p_lock, flags);
+
+    if (should_free) {
+        uint64_t g_flags = spin_lock_irqsave(&g_proc_list_lock);
+        list_del(&p->p_list_link);
+        spin_unlock_irqrestore(&g_proc_list_lock, g_flags);
+
+        proc_free(p);
+    }
+}
+
+struct proc* find_proc(pid_t pid) {
+    struct proc *p;
+    struct proc *found = NULL;
+    uint64_t flags = spin_lock_irqsave(&g_proc_list_lock);
+    list_for_each_entry(p, &g_proc_list, p_list_link) {
+        if (p->p_pid == pid) {
+            proc_ref(p);
+            found = p;
+            break;
+        }
+    }
+    spin_unlock_irqrestore(&g_proc_list_lock, flags);
+    return found;
 }

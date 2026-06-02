@@ -15,5 +15,6 @@ void sched_enqueue(struct thread *t);
 struct thread* sched_dequeue(void);
 
 void mi_switch(void);
+void thread_signal_wakeup(struct thread *t);
 
 extern volatile uint64_t g_ticks;

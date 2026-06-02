@@ -1,0 +1,22 @@
+{
+    "configurations": [
+        {
+            "name": "Doppio (Mika)",
+            "includePath": [
+                "${workspaceFolder}",
+                "${workspaceFolder}/include",
+                "${workspaceFolder}/kernel",
+                "${workspaceFolder}/musl/build_out/include"
+            ],
+            "defines": [
+                "__x86_64__",
+                "__ELF__"
+            ],
+            "compilerPath": "/usr/bin/clang",
+            "cStandard": "gnu11",
+            "cppStandard": "gnu++14",
+            "intelliSenseMode": "linux-clang-x64"
+        }
+    ],
+    "version": 4
+}

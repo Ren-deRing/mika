@@ -100,6 +100,10 @@ void mi_switch(void) {
     }
 
     if (prev == next && prev->t_state != THREAD_ZOMBIE) {
+        if (prev->t_lock_to_release) {
+            spin_unlock(prev->t_lock_to_release);
+            prev->t_lock_to_release = NULL;
+        }
         arch_irq_restore(flags);
         return;
     }
@@ -116,6 +120,11 @@ void mi_switch(void) {
 
     if (next->t_proc != prev->t_proc) {
         arch_switch_mm(prev->t_proc, next->t_proc);
+    }
+
+    if (prev->t_lock_to_release) {
+        spin_unlock(prev->t_lock_to_release);
+        prev->t_lock_to_release = NULL;
     }
 
     arch_context_switch(prev, next);
@@ -181,6 +190,42 @@ void sched_tick(void) {
             }
         }
     }
+}
+
+void thread_signal_wakeup(struct thread *t) {
+    if (!t) return;
+
+    cpu_status_t flags = arch_irq_save();
+
+    if (t->t_state == THREAD_SLEEP) {
+        spin_lock(&sleep_queue.lock);
+        if (sleep_queue.head == t) {
+            sleep_queue.head = t->t_sched_next;
+            t->t_sched_next = NULL;
+            spin_unlock(&sleep_queue.lock);
+            sched_enqueue(t);
+        } else {
+            struct thread *curr = sleep_queue.head;
+            while (curr && curr->t_sched_next != t) {
+                curr = curr->t_sched_next;
+            }
+            if (curr) {
+                curr->t_sched_next = t->t_sched_next;
+                t->t_sched_next = NULL;
+                spin_unlock(&sleep_queue.lock);
+                sched_enqueue(t);
+            } else {
+                spin_unlock(&sleep_queue.lock);
+            }
+        }
+    } else if (t->t_state == THREAD_WAITING) {
+        if (t->t_wait_node.next && t->t_wait_node.prev) {
+            list_del(&t->t_wait_node);
+        }
+        sched_enqueue(t);
+    }
+
+    arch_irq_restore(flags);
 }
 
 void scheduler_init(void) {
