@@ -60,7 +60,7 @@ static const char* get_state_name(thread_state_t state) {
 
 #include <kernel/printf.h>
 
-static void dump_ready_queue(void) {
+__attribute__((unused)) static void dump_ready_queue(void) {
     struct thread *curr = ready_queue.head;
     
     dprintf("[Sched Dump] Ready Queue: ");
@@ -100,6 +100,7 @@ void mi_switch(void) {
     }
 
     if (prev == next && prev->t_state != THREAD_ZOMBIE) {
+        prev->t_state = THREAD_RUNNING;
         if (prev->t_lock_to_release) {
             spin_unlock(prev->t_lock_to_release);
             prev->t_lock_to_release = NULL;
@@ -126,6 +127,10 @@ void mi_switch(void) {
         spin_unlock(prev->t_lock_to_release);
         prev->t_lock_to_release = NULL;
     }
+
+    // dprintf("[SWITCH] Switching from TID %d (%s) to TID %d (%s), prev_fs: %p, next_fs: %p\n", 
+    //         prev->t_tid, get_state_name(prev->t_state), next->t_tid, get_state_name(next->t_state),
+    //         (void*)prev->t_fs_base, (void*)next->t_fs_base);
 
     arch_context_switch(prev, next);
 

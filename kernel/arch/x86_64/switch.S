@@ -24,9 +24,33 @@ arch_context_switch:
     pushq %r14
     pushq %r15
 
+    movq THREAD_ARCH_DATA(%rdi), %rcx
+    testq %rcx, %rcx
+    jz .Lno_xsave
+    movl $0xFFFFFFFF, %eax
+    movl $0xFFFFFFFF, %edx
+    xsaveq (%rcx)
+.Lno_xsave:
+
     movq %rsp, 24(%rdi)
 
     movq 24(%rsi), %rsp
+
+    movq THREAD_ARCH_DATA(%rsi), %rcx
+    testq %rcx, %rcx
+    jz .Lno_xrstor
+    movl $0xFFFFFFFF, %eax
+    movl $0xFFFFFFFF, %edx
+    xrstorq (%rcx)
+.Lno_xrstor:
+
+    # Restore FS_BASE
+    movq THREAD_FS_BASE(%rsi), %rax
+    movq %rax, %rdx
+    shrq $32, %rdx
+    movl %eax, %eax
+    movl $0xC0000100, %ecx
+    wrmsr
 
     movq THREAD_TRAPFRAME(%rsi), %rax
     cmpq %rax, %rsp

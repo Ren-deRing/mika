@@ -132,14 +132,3 @@
 #define ERFKILL         132    /* Operation not possible due to RF-kill */
 #define EHWPOISON       133    /* Memory page has hardware error */
 #define ENOTSUP         134    /* Not supported parameter or option */
-
-#ifndef _KERNEL_
-extern int errno;
-#define __errno_set(ret, err_code, ...)  \
-    do {                                 \
-        if ((ret) < 0) {                 \
-            errno = (err_code);          \
-            __VA_ARGS__;                 \
-        }                                \
-    } while (0)
-#endif

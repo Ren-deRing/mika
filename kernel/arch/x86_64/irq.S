@@ -121,12 +121,6 @@ isr_common_stub:
     movq %rcx, %rsp
 
 .skip_rsp_restore:
-    movq 104(%rax), %rax
-    movq %rax, %rdx
-    shrq $32, %rdx
-    movl %eax, %eax
-    movl $0xC0000100, %ecx
-    wrmsr
 
 restore_and_exit:
     popq %r15

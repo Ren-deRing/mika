@@ -37,6 +37,7 @@ int main() {
     printf("#define THREAD_STATE        0x%zx\n", offsetof(struct thread, t_state));
     printf("#define THREAD_TRAPFRAME    0x%zx\n", offsetof(struct thread, t_trapframe));
     printf("#define THREAD_FS_BASE      0x%zx\n", offsetof(struct thread, t_fs_base));
+    printf("#define THREAD_ARCH_DATA    0x%zx\n", offsetof(struct thread, t_arch_data));
 
     return 0;
 }

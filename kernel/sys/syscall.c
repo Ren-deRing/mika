@@ -291,6 +291,15 @@ int64_t sys_read(int fd, void *user_buf, size_t count) {
 }
 
 int sys_fork(void) {
+    if (curthread->t_arch_data) {
+        uint32_t eax = 0xFFFFFFFF;
+        uint32_t edx = 0xFFFFFFFF;
+        asm volatile("xsaveq (%0)" 
+                     : 
+                     : "r"(curthread->t_arch_data), "a"(eax), "d"(edx) 
+                     : "memory");
+    }
+
     struct proc *parent_p = curproc;
     struct thread *parent_t = curthread;
 

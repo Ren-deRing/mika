@@ -71,6 +71,46 @@ int main(int argc, char *argv[]) {
         } else {
             printf("[PARENT] Child terminated.\n");
         }
+
+        printf("\n[FPU] Starting XSAVE Test...\n");
+        pid_t fpu_pid = fork();
+        if (fpu_pid < 0) {
+            perror("[PARENT] FPU fork failed");
+            return 1;
+        }
+        else if (fpu_pid == 0) {
+            volatile double f = 10.0;
+            printf("[CHILD] Start value: %f\n", f);
+            
+            for (int i = 0; i < 500; i++) {
+                for (volatile int j = 0; j < 50000; j++);
+                f = f + 0.1;
+                if (i % 100 == 0) {
+                    printf("[CHILD] Progress loop %d, f = %f\n", i, f);
+                }
+            }
+            
+            printf("[CHILD] Result: %f (Expected: ~60.000000)\n", f);
+            exit(0);
+        }
+        else {
+            volatile double f = 100.0;
+            printf("[PARENT] Start value: %f\n", f);
+            
+            for (int i = 0; i < 500; i++) {
+                for (volatile int j = 0; j < 50000; j++);
+                f = f - 0.1;
+                if (i % 100 == 0) {
+                    printf("[PARENT] Progress loop %d, f = %f\n", i, f);
+                }
+            }
+            
+            printf("[PARENT] Result: %f (Expected: ~50.000000)\n", f);
+            
+            int fpu_status = 0;
+            waitpid(fpu_pid, &fpu_status, 0);
+            printf("[PARENT] BYE!\n");
+        }
     }
 
     return 0;
