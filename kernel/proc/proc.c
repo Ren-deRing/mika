@@ -52,8 +52,12 @@ struct thread* thread_create(struct proc *p, tid_t tid, void (*entry)(void *), v
     return t;
 }
 
+extern void shm_cleanup_proc(struct proc *p);
+
 void proc_free(struct proc *p) {
     if (!p) return;
+
+    shm_cleanup_proc(p);
 
     for (int i = 0; i < MAX_FILES; i++) {
         if (p->p_fd_table[i]) {

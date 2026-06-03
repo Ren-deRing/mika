@@ -39,6 +39,7 @@ void vfs_init(void) {
     g_root_vnode->ops->mkdir(g_root_vnode, "tmp", 1777);
     g_root_vnode->ops->mkdir(g_root_vnode, "proc", 0555);
     g_root_vnode->ops->mkdir(g_root_vnode, "usr", 0755);
+    g_root_vnode->ops->mkdir(g_root_vnode, "mnt", 0755);
 
     struct vnode *usr_vn;
     if (vfs_lookup("/usr", curproc->p_cwd, &usr_vn) == 0) {
@@ -117,6 +118,9 @@ int vfs_lookup(const char *path, struct vnode *base, struct vnode **res) {
             err = curr->ops->lookup(curr, name, &found);
             if (err < 0) {
                 vput(curr);
+                if (err == -ENOENT && path[0] == '/' && strncmp(path, "/mnt/", 5) == 0) {
+                    return vfs_lookup(path + 4, base, res);
+                }
                 return err;
             }
             vfs_hash_insert(curr, name, found);

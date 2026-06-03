@@ -118,6 +118,11 @@ int main(int argc, char *argv[]) {
             printf("[PARENT] BYE!\n");
         }
     }
+
+    char *exe_argv[] = {"/bin/shm_sem_test", "hello_arg1", "hello_arg2", NULL};
+    char *exe_envp[] = {"PATH=/bin", "USER=heebb", "SHELL=/bin/sh", NULL};
+
+    execve("/bin/shm_sem_test", exe_argv, exe_envp);
     
     char *doom_argv[4];
     doom_argv[0] = "/bin/doom";

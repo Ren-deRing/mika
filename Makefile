@@ -21,7 +21,7 @@ MUSL_DIR := $(BASE_DIR)/musl
 
 export MUSL_OUT_DIR := $(MUSL_DIR)/build_out
 
-SUBDIRS := lib libc util kernel user modules boot
+SUBDIRS := lib libc util kernel user apps modules boot
 
 ifeq ($(ARCH), x86_64)
     ARCH_CFLAGS  := -m64 -march=x86-64 -mno-red-zone
