@@ -38,17 +38,40 @@ void vfs_init(void) {
     g_root_vnode->ops->mkdir(g_root_vnode, "dev", 0755);
     g_root_vnode->ops->mkdir(g_root_vnode, "tmp", 1777);
     g_root_vnode->ops->mkdir(g_root_vnode, "proc", 0555);
+    g_root_vnode->ops->mkdir(g_root_vnode, "usr", 0755);
+
+    struct vnode *usr_vn;
+    if (vfs_lookup("/usr", curproc->p_cwd, &usr_vn) == 0) {
+        usr_vn->ops->mkdir(usr_vn, "share", 0755);
+        struct vnode *share_vn;
+        if (vfs_lookup("share", usr_vn, &share_vn) == 0) {
+            share_vn->ops->mkdir(share_vn, "games", 0755);
+            struct vnode *games_vn;
+            if (vfs_lookup("games", share_vn, &games_vn) == 0) {
+                games_vn->ops->mkdir(games_vn, "doom", 0755);
+                vput(games_vn);
+            }
+            vput(share_vn);
+        }
+        vput(usr_vn);
+    }
 
     struct vnode *dev_vn;
     int err_lookup = vfs_lookup("/dev", curproc->p_cwd, &dev_vn);
     if (err_lookup == 0) {
         struct vnode *null_vn;
         struct vnode *tty_vn;
+        struct vnode *fb0_vn;
+        struct vnode *kbd_vn;
         dev_vn->ops->create(dev_vn, "null", S_IFCHR | 0666, &null_vn);
         dev_vn->ops->create(dev_vn, "tty", S_IFCHR | 0666, &tty_vn);
+        dev_vn->ops->create(dev_vn, "fb0", S_IFCHR | 0666, &fb0_vn);
+        dev_vn->ops->create(dev_vn, "kbd", S_IFCHR | 0666, &kbd_vn);
         vput(dev_vn);
         if (null_vn) vput(null_vn);
         if (tty_vn) vput(tty_vn);
+        if (fb0_vn) vput(fb0_vn);
+        if (kbd_vn) vput(kbd_vn);
     }
 
     if (g_boot_info.initrd.virt_base) {

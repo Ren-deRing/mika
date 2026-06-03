@@ -49,6 +49,7 @@ page_t* page_alloc(uint8_t order);
 void page_free(page_t* page, uint8_t order);
 
 bool mmu_map(page_table_t* map, uintptr_t virt, uintptr_t phys, uint64_t flags);
+bool mmu_map_4k(page_table_t* map, uintptr_t virt, uintptr_t phys, uint64_t flags);
 void mmu_unmap(page_table_t* map, uintptr_t virt);
 void mmu_protect_page(page_table_t* map, uintptr_t vaddr, int prot);
 uintptr_t mmu_translate(page_table_t* map, uintptr_t virt);

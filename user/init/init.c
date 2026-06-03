@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <stdlib.h>
@@ -10,7 +11,12 @@ void sigusr1_handler(int sig) {
 }
 
 int main(int argc, char *argv[]) {
+    int fd_stdin = open("/dev/tty", O_RDONLY);
+    int fd_stdout = open("/dev/tty", O_WRONLY);
+    int fd_stderr = open("/dev/tty", O_WRONLY);
+
     printf("Hello MUSL!\n");
+    printf("[INIT] Standard streams opened: stdin=%d, stdout=%d, stderr=%d\n", fd_stdin, fd_stdout, fd_stderr);
 
     pid_t parent_pid = getpid();
     printf("[PARENT] PID is: %d\n", parent_pid);
@@ -113,6 +119,39 @@ int main(int argc, char *argv[]) {
         }
     }
     
+    char *doom_argv[4];
+    doom_argv[0] = "/bin/doom";
+    
+    printf("[INIT] Checking for WAD files...\n");
+    int fd1 = open("/usr/share/games/doom/freedoom1.wad", 0);
+    int fd2 = -1;
+    if (fd1 < 0) {
+        fd2 = open("/usr/share/games/doom/freedoom2.wad", 0);
+    }
+
+    if (fd1 >= 0) {
+        close(fd1);
+        printf("[INIT] Found Freedoom Phase 1 WAD!\n");
+        doom_argv[1] = "-iwad";
+        doom_argv[2] = "/usr/share/games/doom/freedoom1.wad";
+        doom_argv[3] = NULL;
+    } else if (fd2 >= 0) {
+        close(fd2);
+        printf("[INIT] Found Freedoom Phase 2 WAD!\n");
+        doom_argv[1] = "-iwad";
+        doom_argv[2] = "/usr/share/games/doom/freedoom2.wad";
+        doom_argv[3] = NULL;
+    } else {
+        printf("[INIT] No Freedoom WAD found in standard location, let doom engine auto-detect.\n");
+        doom_argv[1] = NULL;
+    }
+
+    char *doom_envp[] = {"PATH=/bin", "USER=heebb", "SHELL=/bin/sh", NULL};
+
+    printf("[INIT] Launching DOOM...\n");
+    execve("/bin/doom", doom_argv, doom_envp);
+
+    printf("[INIT] DOOM could not be executed or exited, falling back to Hello!\n");
     char *execve_argv[] = {"/bin/hello", "hello_arg1", "hello_arg2", NULL};
     char *execve_envp[] = {"PATH=/bin", "USER=heebb", "SHELL=/bin/sh", NULL};
 

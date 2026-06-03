@@ -131,6 +131,7 @@ iso: all
 
 run: iso
 	qemu-system-x86_64 \
+		-machine q35 \
 		-cdrom $(ISO_IMAGE) \
 		-m 8G \
 		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \

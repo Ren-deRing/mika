@@ -10,6 +10,7 @@ struct ramfs_entry {
 struct ramfs_node {
     char *buffer;
     size_t size;
+    int is_static_buf;
     
     mode_t mode;
     uid_t uid;

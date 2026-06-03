@@ -98,7 +98,7 @@ uintptr_t setup_user_stack(page_table_t *new_map, uintptr_t user_stack_top,
     for (int i = 0; i < argc; i++) { strings_size += strlen(argv[i]) + 1; }
     for (int i = 0; i < envc; i++) { strings_size += strlen(envp[i]) + 1; }
 
-    size_t table_elements = 1 + argc + 1 + envc + 1 + 10;
+    size_t table_elements = 1 + argc + 1 + envc + 1 + 12;
     size_t table_bytes = table_elements * sizeof(uintptr_t);
 
     size_t total_pure_size = table_bytes + strings_size;

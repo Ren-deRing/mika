@@ -701,6 +701,14 @@ bool mmu_map(page_table_t* map, uintptr_t vaddr, uintptr_t paddr, uint64_t prot)
     return ret;
 }
 
+bool mmu_map_4k(page_table_t* map, uintptr_t vaddr, uintptr_t paddr, uint64_t prot) {
+    uint64_t x86_flags = mmu_to_x86_flags(prot);
+    uint64_t lock_flags = spin_lock_irqsave(&g_mmu_lock);
+    bool ret = vmm_map(map, (uint64_t)vaddr, (uint64_t)paddr, x86_flags);
+    spin_unlock_irqrestore(&g_mmu_lock, lock_flags);
+    return ret;
+}
+
 void mmu_unmap(page_table_t* map, uintptr_t vaddr) {
     uint64_t lock_flags = spin_lock_irqsave(&g_mmu_lock);
     vmm_unmap(map, (uint64_t)vaddr);

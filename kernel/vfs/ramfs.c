@@ -129,7 +129,7 @@ int ramfs_inactive(struct vnode *vp) {
                 curr = next;
             }
         }
-        if (node->buffer) kfree(node->buffer);
+        if (node->buffer && !node->is_static_buf) kfree(node->buffer);
         kfree(node);
         vp->data = NULL;
     }
@@ -140,6 +140,16 @@ int ramfs_inactive(struct vnode *vp) {
 ssize_t ramfs_write(struct vnode *vp, const void *buf, size_t count, off_t off) {
     struct ramfs_node *node = (struct ramfs_node *)vp->data;
     if (vp->type != S_IFREG) return -EISDIR;
+
+    if (node->is_static_buf) {
+        char *new_buf = kmalloc(node->size);
+        if (!new_buf) return -ENOMEM;
+        if (node->buffer && node->size > 0) {
+            memcpy(new_buf, node->buffer, node->size);
+        }
+        node->buffer = new_buf;
+        node->is_static_buf = 0;
+    }
 
     if (off + count > node->size) {
         size_t new_size = off + count;

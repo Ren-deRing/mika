@@ -18,6 +18,12 @@
 
 #define USER_ADDR_LIMIT  0x0000800000000000UL
 
+extern uint64_t get_uptime_ns(void);
+extern int keyboard_queue_pop(void);
+
+extern int64_t sys_read(int fd, void *user_buf, size_t count);
+extern int64_t sys_write(int fd, const void *user_buf, size_t count);
+
 typedef int64_t (*syscall_t)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 
 static inline bool is_user_address_range(const void *addr, size_t size) {
@@ -127,6 +133,42 @@ int64_t sys_writev(int fd, const void *user_iov, int iovcnt) {
             return total > 0 ? total : r;
         }
         total += r;
+    }
+
+    kfree(kiov);
+    return total;
+}
+
+int64_t sys_readv(int fd, const void *user_iov, int iovcnt) {
+    if (fd < 0 || fd >= MAX_FILES) return -EBADF;
+    if (iovcnt <= 0 || iovcnt > 1024) return -EINVAL;
+
+    typedef struct { void *base; size_t len; } kiov_t;
+
+    if (!is_user_address_range(user_iov, iovcnt * sizeof(kiov_t))) {
+        return -EFAULT;
+    }
+
+    kiov_t *kiov = kmalloc(iovcnt * sizeof(kiov_t));
+    if (!kiov) return -ENOMEM;
+
+    if (copy_from_user(kiov, user_iov, iovcnt * sizeof(kiov_t)) < 0) {
+        kfree(kiov);
+        return -EFAULT;
+    }
+
+    int64_t total = 0;
+    for (int i = 0; i < iovcnt; i++) {
+        if (kiov[i].len == 0) continue;
+        int64_t r = sys_read(fd, kiov[i].base, kiov[i].len);
+        if (r < 0) {
+            kfree(kiov);
+            return total > 0 ? total : r;
+        }
+        total += r;
+        if (r < (int64_t)kiov[i].len) {
+            break;
+        }
     }
 
     kfree(kiov);
@@ -433,14 +475,53 @@ int64_t sys_exit(int64_t status) {
     }
 
     mi_switch();
+    return 0;
 }
 
 int64_t sys_mmap(uintptr_t addr, size_t length, int prot, int flags, int fd, int64_t offset) {
     (void)flags;
-    (void)fd;
     (void)offset;
 
     if (length == 0) return -EINVAL;
+
+    if (fd >= 0 && fd < MAX_FILES) {
+        struct file *f = curproc->p_fd_table[fd];
+        if (f && f->f_vn && strcmp(f->f_vn->v_name, "fb0") == 0) {
+            size_t fb_size = g_boot_info.fb.pitch * g_boot_info.fb.height;
+            size_t aligned_fb_len = ALIGN_UP(fb_size, PAGE_SIZE);
+            if (length > aligned_fb_len) length = aligned_fb_len;
+
+            if (addr == 0) {
+                addr = 0x500000000000;
+                while (1) {
+                    bool range_free = true;
+                    for (uintptr_t offset = 0; offset < aligned_fb_len; offset += PAGE_SIZE) {
+                        if (mmu_translate(curproc->p_vm_map, addr + offset) != 0) {
+                            range_free = false;
+                            addr = ALIGN_UP(addr + offset + PAGE_SIZE, PAGE_SIZE);
+                            break;
+                        }
+                    }
+                    if (range_free) break;
+                }
+            }
+
+            uintptr_t phys_fb = mmu_translate(mmu_get_kernel_map(), (uintptr_t)g_boot_info.fb.fb_addr);
+            if (phys_fb == 0) {
+                phys_fb = (uintptr_t)g_boot_info.fb.fb_addr - g_boot_info.hhdm_offset;
+            }
+            dprintf("[KERNEL sys_mmap fb0] fb_addr=%p -> phys_fb=%p\n", g_boot_info.fb.fb_addr, phys_fb);
+            uintptr_t start = ALIGN_DOWN(addr, PAGE_SIZE);
+
+            for (uintptr_t i = 0; i < aligned_fb_len; i += PAGE_SIZE) {
+                uint32_t mmu_flags = MMU_FLAGS_USER | MMU_FLAGS_WRITE | MMU_FLAGS_READ;
+                if (!mmu_map_4k(curproc->p_vm_map, start + i, phys_fb + i, mmu_flags)) {
+                    return -ENOMEM;
+                }
+            }
+            return start;
+        }
+    }
 
     size_t aligned_len = ALIGN_UP(length, PAGE_SIZE);
     bool need_search = (addr == 0);
@@ -501,7 +582,7 @@ int64_t sys_mmap(uintptr_t addr, size_t length, int prot, int flags, int fd, int
         uint32_t mmu_flags = MMU_FLAGS_USER;
         if (prot & 0x2) mmu_flags |= MMU_FLAGS_WRITE; // PROT_WRITE
 
-        if (!mmu_map(curproc->p_vm_map, i, paddr, mmu_flags)) {
+        if (!mmu_map_4k(curproc->p_vm_map, i, paddr, mmu_flags)) {
             page_free(pg, 0);
             return -ENOMEM;
         }
@@ -551,7 +632,7 @@ int64_t sys_brk(uintptr_t brk) {
                 }
                 uintptr_t paddr = page_to_phys(pg);
                 memset(p2v(paddr), 0, PAGE_SIZE);
-                if (!mmu_map(curproc->p_vm_map, i, paddr, MMU_FLAGS_USER | MMU_FLAGS_WRITE)) {
+                if (!mmu_map_4k(curproc->p_vm_map, i, paddr, MMU_FLAGS_USER | MMU_FLAGS_WRITE)) {
                     page_free(pg, 0);
                     return old_brk; 
                 }
@@ -581,6 +662,7 @@ int64_t sys_open(const char *user_path, int flags, mode_t mode) {
 
     int fd_out = -1;
     int err = vfs_open(kpath, flags, mode, &fd_out);
+    dprintf("[KERNEL sys_open] path='%s', flags=%x, mode=%x -> fd=%d (err=%d)\n", kpath, flags, mode, fd_out, err);
     if (err < 0) return (int64_t)err;
     return (int64_t)fd_out;
 }
@@ -597,10 +679,34 @@ int64_t sys_close(int fd) {
     return 0;
 }
 
+int64_t sys_lseek(int fd, off_t offset, int whence) {
+    int64_t res = (int64_t)vfs_lseek(fd, offset, whence);
+
+    return res;
+}
+
 int64_t sys_read(int fd, void *user_buf, size_t count) {
     if (fd < 0 || fd >= MAX_FILES) return -EBADF;
     if (count == 0) return 0;
     if (!is_user_address_range(user_buf, count)) return -EFAULT;
+
+    struct file *f = curproc->p_fd_table[fd];
+    if (f && f->f_vn && strcmp(f->f_vn->v_name, "kbd") == 0) {
+        size_t copied = 0;
+        char *ubuf = (char *)user_buf;
+
+        while (copied < count) {
+            int sc = keyboard_queue_pop();
+            if (sc < 0) break;
+
+            uint8_t sc8 = (uint8_t)sc;
+            if (copy_to_user(ubuf + copied, &sc8, 1) < 0) {
+                return -EFAULT;
+            }
+            copied++;
+        }
+        return (int64_t)copied;
+    }
 
     char kbuf[4096];
     size_t total = 0;
@@ -610,13 +716,16 @@ int64_t sys_read(int fd, void *user_buf, size_t count) {
         if (to_copy > sizeof(kbuf)) to_copy = sizeof(kbuf);
 
         int n = vfs_read(fd, kbuf, to_copy);
+
         if (n < 0) return (total == 0) ? n : (int64_t)total;
         if (n == 0) break;
 
-        if (copy_to_user((char *)user_buf + total, kbuf, n) < 0)
+        if (copy_to_user((char *)user_buf + total, kbuf, n) < 0) {
             return -EFAULT;
+        }
         total += n;
     }
+
     return (int64_t)total;
 }
 
@@ -766,6 +875,17 @@ int64_t sys_execve(const char *user_path, char *const argv[], char *const envp[]
     char kpath[256];
     if (copy_from_user(kpath, user_path, 256) < 0) {
         return -EFAULT;
+    }
+
+    dprintf("[KERNEL sys_execve] path='%s'\n", kpath);
+    if (argv) {
+        int i = 0;
+        while (argv[i]) {
+            dprintf("[KERNEL sys_execve] argv[%d] = '%s' (ptr=%p)\n", i, argv[i], argv[i]);
+            i++;
+        }
+    } else {
+        dprintf("[KERNEL sys_execve] argv is NULL\n");
     }
 
     struct vnode *vn = NULL;
@@ -997,6 +1117,28 @@ int64_t sys_getpid(void) {
 }
 
 int64_t sys_ioctl(int fd, uint64_t request, void *arg) {
+    if (fd >= 0 && fd < MAX_FILES) {
+        struct file *f = curproc->p_fd_table[fd];
+        if (f && f->f_vn && strcmp(f->f_vn->v_name, "fb0") == 0) {
+            if (request == 0x4601) { // FBIOGET_INFO
+                struct {
+                    uint32_t width;
+                    uint32_t height;
+                    uint32_t pitch;
+                    uint32_t bpp;
+                } info = {
+                    g_boot_info.fb.width,
+                    g_boot_info.fb.height,
+                    g_boot_info.fb.pitch,
+                    g_boot_info.fb.bpp
+                };
+                if (!is_user_address_range(arg, sizeof(info))) return -EFAULT;
+                if (copy_to_user(arg, &info, sizeof(info)) < 0) return -EFAULT;
+                return 0;
+            }
+        }
+    }
+
     if (request == 0x5413) {
         if (!is_user_address_range(arg, 8)) {
             return -EFAULT;
@@ -1014,6 +1156,31 @@ int64_t sys_ioctl(int fd, uint64_t request, void *arg) {
     return -ENOTTY;
 }
 
+int64_t sys_fcntl(int fd, int cmd, uint64_t arg) {
+    if (fd < 0 || fd >= MAX_FILES) return -EBADF;
+
+    struct file *f = curproc->p_fd_table[fd];
+    if (!f) return -EBADF;
+
+    dprintf("[KERNEL sys_fcntl] fd=%d, cmd=%d, arg=%llu\n", fd, cmd, arg);
+
+    if (cmd == 3) { // F_GETFL
+        return (int64_t)f->f_flags;
+    }
+    if (cmd == 4) { // F_SETFL
+        f->f_flags = (f->f_flags & ~0xFFFFFFF) | (arg & 0xFFFFFFF);
+        return 0;
+    }
+    if (cmd == 1) { // F_GETFD
+        return 0;
+    }
+    if (cmd == 2) { // F_SETFD
+        return 0;
+    }
+
+    return 0;
+}
+
 int64_t sys_getrlimit(int resource, void *user_rlim) {
     struct { uint64_t cur, max; } rl = { 8*1024*1024UL, (uint64_t)-1 };
     if (!is_user_address_range(user_rlim, sizeof(rl))) return -EFAULT;
@@ -1022,7 +1189,12 @@ int64_t sys_getrlimit(int resource, void *user_rlim) {
 }
 
 int64_t sys_clock_gettime(int clk_id, void *user_tp) {
-    struct { int64_t tv_sec; int64_t tv_nsec; } tp = {0, 0};
+    (void)clk_id;
+    struct { int64_t tv_sec; int64_t tv_nsec; } tp;
+    uint64_t ns = get_uptime_ns();
+    tp.tv_sec = ns / 1000000000ULL;
+    tp.tv_nsec = ns % 1000000000ULL;
+
     if (!is_user_address_range(user_tp, sizeof(tp))) return -EFAULT;
     if (copy_to_user(user_tp, &tp, sizeof(tp)) < 0) return -EFAULT;
     return 0;
@@ -1224,6 +1396,7 @@ static syscall_t syscall_table[] = {
     [2] = (syscall_t)sys_open,
     [3] = (syscall_t)sys_close,
     [5] = (syscall_t)sys_fstat,
+    [8] = (syscall_t)sys_lseek,
     [9]  = (syscall_t)sys_mmap,
     [10] = (syscall_t)sys_mprotect,
     [11] = (syscall_t)sys_munmap,
@@ -1232,6 +1405,7 @@ static syscall_t syscall_table[] = {
     [14] = (syscall_t)sys_rt_sigprocmask,
     [15] = (syscall_t)sys_rt_sigreturn,
     [16] = (syscall_t)sys_ioctl,
+    [19] = (syscall_t)sys_readv,
     [20] = (syscall_t)sys_writev,
     [39] = (syscall_t)sys_getpid,
     [56] = (syscall_t)sys_clone,
@@ -1241,6 +1415,7 @@ static syscall_t syscall_table[] = {
     [61] = (syscall_t)sys_wait4,
     [62] = (syscall_t)sys_kill,
     // [63]  = (syscall_t)sys_uname,
+    [72] = (syscall_t)sys_fcntl,
     [97]  = (syscall_t)sys_getrlimit,
     [158] = (syscall_t)sys_arch_prctl,
     [202] = (syscall_t)sys_futex,

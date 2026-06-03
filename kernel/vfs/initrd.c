@@ -1,6 +1,11 @@
 #include <boot/bootinfo.h>
 
 #include <kernel/fs/vfs.h>
+#include <kernel/fs/ramfs.h>
+#include <kernel/fs/vnode.h>
+#include <kernel/fs/file.h>
+#include <kernel/proc.h>
+#include <kernel/cpu.h>
 #include <kernel/printf.h>
 
 #include <uapi/fcntl.h>
@@ -68,7 +73,17 @@ void vfs_load_initrd(uintptr_t addr, uint64_t size) {
         } else if (S_ISREG(mode)) {
             int fd;
             if (vfs_open(path, O_CREAT | O_WRONLY, mode & 0777, &fd) == 0) {
-                vfs_write(fd, data, filesize);
+                struct proc *p = curproc;
+                if (p && fd >= 0 && fd < MAX_FILES && p->p_fd_table[fd]) {
+                    struct file *f = p->p_fd_table[fd];
+                    struct vnode *vp = f->f_vn;
+                    if (vp && vp->data) {
+                        struct ramfs_node *node = (struct ramfs_node *)vp->data;
+                        node->buffer = (char *)data;
+                        node->size = filesize;
+                        node->is_static_buf = 1;
+                    }
+                }
                 vfs_close(fd);
             }
         }

@@ -161,4 +161,5 @@ void arch_exec_setup_trapframe(struct trapframe *tf, uintptr_t entry, uintptr_t 
     tf->ss = 0x23;
     tf->rcx = entry;  
     tf->r11 = 0x202;
+    tf->rflags = 0x202;
 }
