@@ -184,5 +184,10 @@ int main(int argc, char *argv[]) {
     }
 
     printf("[TEST] BYE!\n");
+
+    char *execve_argv[] = {"/bin/shm_sem_test", "hello_arg1", "hello_arg2", NULL};
+    char *execve_envp[] = {"PATH=/bin", "USER=heebb", "SHELL=/bin/sh", NULL};
+
+    execve("/bin/shm_sem_test", execve_argv, execve_envp);
     return 0;
 }

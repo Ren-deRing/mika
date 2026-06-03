@@ -556,6 +556,7 @@ page_table_t* vmm_get_current_pml4(void) {
 }
 
 uint64_t vmm_get_phys(page_table_t* pml4, uint64_t virt) {
+    if (!pml4) return 0;
     page_table_t* current_table = pml4;
     uint64_t indices[4] = { GET_PML4_IDX(virt), GET_PDPT_IDX(virt), GET_PD_IDX(virt), GET_PT_IDX(virt) };
 
@@ -716,6 +717,7 @@ void mmu_unmap(page_table_t* map, uintptr_t vaddr) {
 }
 
 uintptr_t mmu_translate(page_table_t* map, uintptr_t vaddr) {
+    if (!map) return 0;
     uint64_t phys = vmm_get_phys(map, (uint64_t)vaddr);
     return (uintptr_t)phys;
 }

@@ -106,7 +106,7 @@ void panic(const char* description, struct trapframe *regs) {
         uintptr_t write_target = regs->rsp - 8;
         dprintf("Expected write target: %016lx\n", write_target);
         
-        if (curthread && curthread->t_proc) {
+        if (curthread && curthread->t_proc && curthread->t_proc->p_vm_map) {
             uintptr_t paddr = mmu_translate(curthread->t_proc->p_vm_map, write_target);
             dprintf("mmu_translate(write_target): %016lx\n", paddr);
             paddr = mmu_translate(curthread->t_proc->p_vm_map, regs->rsp);

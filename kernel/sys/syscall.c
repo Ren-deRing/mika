@@ -20,6 +20,7 @@ bool is_user_address_range(const void *addr, size_t size) {
 }
 
 int copy_to_user(void *user_dest, const void *src, size_t n) {
+    if (!curthread || !curthread->t_proc || !curthread->t_proc->p_vm_map) return -1;
     page_table_t *map = curthread->t_proc->p_vm_map;
     uintptr_t dest = (uintptr_t)user_dest;
     uint8_t *s = (uint8_t *)src;
@@ -40,6 +41,7 @@ int copy_to_user(void *user_dest, const void *src, size_t n) {
 }
 
 int copy_from_user(void *dest, const void *user_src, size_t n) {
+    if (!curthread || !curthread->t_proc || !curthread->t_proc->p_vm_map) return -1;
     page_table_t *map = curthread->t_proc->p_vm_map;
     uintptr_t src = (uintptr_t)user_src;
     uint8_t *d = (uint8_t *)dest;

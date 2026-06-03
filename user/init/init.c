@@ -97,6 +97,7 @@ int main(int argc, char *argv[]) {
             }
             
             printf("[CHILD] Result: %f (Expected: ~60.000000)\n", f);
+
             exit(0);
         }
         else {
@@ -116,13 +117,27 @@ int main(int argc, char *argv[]) {
             int fpu_status = 0;
             waitpid(fpu_pid, &fpu_status, 0);
             printf("[PARENT] BYE!\n");
+
+            pid_t hello_pid = fork();
+            if (hello_pid < 0) {
+                perror("[PARENT] HELLO fork failed");
+                return 1;
+            }
+            else if (hello_pid == 0) {        
+                char *execve_argv[] = {"/bin/hello", "hello_arg1", "hello_arg2", NULL};
+                char *execve_envp[] = {"PATH=/bin", "USER=heebb", "SHELL=/bin/sh", NULL};
+
+                execve("/bin/hello", execve_argv, execve_envp);
+
+                exit(0);
+            }
+            else {
+                int hello_status = 0;
+                waitpid(hello_pid, &hello_status, 0);
+                printf("[PARENT] BYE!\n");
+            }
         }
     }
-
-    char *exe_argv[] = {"/bin/shm_sem_test", "hello_arg1", "hello_arg2", NULL};
-    char *exe_envp[] = {"PATH=/bin", "USER=heebb", "SHELL=/bin/sh", NULL};
-
-    execve("/bin/shm_sem_test", exe_argv, exe_envp);
     
     char *doom_argv[4];
     doom_argv[0] = "/bin/doom";
@@ -155,12 +170,6 @@ int main(int argc, char *argv[]) {
 
     printf("[INIT] Launching DOOM...\n");
     execve("/bin/doom", doom_argv, doom_envp);
-
-    printf("[INIT] DOOM could not be executed or exited, falling back to Hello!\n");
-    char *execve_argv[] = {"/bin/hello", "hello_arg1", "hello_arg2", NULL};
-    char *execve_envp[] = {"PATH=/bin", "USER=heebb", "SHELL=/bin/sh", NULL};
-
-    execve("/bin/hello", execve_argv, execve_envp);
 
     return 0;
 }
