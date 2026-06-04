@@ -197,7 +197,6 @@ int64_t sys_open(const char *user_path, int flags, int mode) {
 
     int fd_out = -1;
     int err = vfs_open(kpath, flags, (mode_t)mode, &fd_out);
-    dprintf("[KERNEL sys_open] path='%s', flags=%x, mode=%x -> fd=%d (err=%d)\n", kpath, flags, mode, fd_out, err);
     if (err < 0) return (int64_t)err;
     return (int64_t)fd_out;
 }
@@ -430,8 +429,6 @@ int64_t sys_fcntl(int fd, int cmd, uint64_t arg) {
     struct file *f = curproc->p_fd_table[fd];
     if (!f) return -EBADF;
 
-    dprintf("[KERNEL sys_fcntl] fd=%d, cmd=%d, arg=%llu\n", fd, cmd, arg);
-
     if (cmd == 3) { // F_GETFL
         return (int64_t)f->f_flags;
     }
@@ -480,4 +477,26 @@ int64_t sys_mount(const char *user_source, const char *user_target, const char *
     }
 
     return -ENOSYS;
+}
+
+int64_t sys_unlink(const char *user_path) {
+    char kpath[256];
+    if (copy_from_user(kpath, user_path, 256) < 0) return -EFAULT;
+    kpath[255] = '\0';
+
+    int err = vfs_unlink(kpath);
+    return (int64_t)err;
+}
+
+int64_t sys_rename(const char *user_old, const char *user_new) {
+    char kold[256];
+    char knew[256];
+    if (copy_from_user(kold, user_old, 256) < 0) return -EFAULT;
+    kold[255] = '\0';
+
+    if (copy_from_user(knew, user_new, 256) < 0) return -EFAULT;
+    knew[255] = '\0';
+
+    int err = vfs_rename(kold, knew);
+    return (int64_t)err;
 }

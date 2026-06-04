@@ -23,6 +23,7 @@ struct vnode_ops {
     int (*inactive)(struct vnode *vp);
     int (*remove)(struct vnode *dvp, const char *name);
     int (*rmdir)(struct vnode *dvp, const char *name);
+    int (*rename)(struct vnode *sdvp, const char *sname, struct vnode *tdvp, const char *dname);
 };
 
 struct vnode {

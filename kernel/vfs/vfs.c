@@ -64,6 +64,20 @@ void vfs_init(void) {
     }
 }
 
+static void sanitize_path(const char *src, char *dst, size_t dst_size) {
+    size_t len = strlen(src);
+    if (len >= dst_size) {
+        len = dst_size - 1;
+    }
+    memcpy(dst, src, len);
+    dst[len] = '\0';
+    
+    while (len > 1 && dst[len - 1] == '/') {
+        dst[len - 1] = '\0';
+        len--;
+    }
+}
+
 static const char* vfs_next_component(const char *path, char *out_name) {
     while (*path == '/') path++; // 선행 슬래시 무시
     if (!*path) return NULL;
@@ -119,23 +133,26 @@ int vfs_open(const char *path, int flags, mode_t mode, int *fd_out) {
     if (!curthread || !curthread->t_proc) return -ESRCH;
     struct proc *p = curthread->t_proc;
 
+    char clean_path[256];
+    sanitize_path(path, clean_path, sizeof(clean_path));
+
     struct vnode *vp = NULL;
-    int err = vfs_lookup(path, p->p_cwd, &vp);
+    int err = vfs_lookup(clean_path, p->p_cwd, &vp);
 
     if (err == -ENOENT && (flags & O_CREAT)) {
         char parent_path[PATH_MAX];
         char child_name[NAME_MAX];
         
-        const char *last_slash = strrchr(path, '/');
+        const char *last_slash = strrchr(clean_path, '/');
         if (!last_slash) {
             // 상대 경로
             strcpy(parent_path, ".");
-            strcpy(child_name, path);
+            strcpy(child_name, clean_path);
         } else {
             // 절대 경로 or 경로포함
-            size_t len = last_slash - path;
+            size_t len = last_slash - clean_path;
             if (len == 0) len = 1; // 루트 "/"
-            strncpy(parent_path, path, len);
+            strncpy(parent_path, clean_path, len);
             parent_path[len] = '\0';
             strcpy(child_name, last_slash + 1);
         }
@@ -258,19 +275,22 @@ int vfs_mkdir(const char *path, mode_t mode) {
     if (!curthread || !curthread->t_proc) return -ESRCH;
     struct proc *p = curthread->t_proc;
 
+    char clean_path[256];
+    sanitize_path(path, clean_path, sizeof(clean_path));
+
     char parent_path[256];
     char child_name[256];
     
-    const char *last_slash = strrchr(path, '/');
+    const char *last_slash = strrchr(clean_path, '/');
     if (!last_slash) {
         strcpy(parent_path, ".");
-        strcpy(child_name, path);
-    } else if (last_slash == path) {
+        strcpy(child_name, clean_path);
+    } else if (last_slash == clean_path) {
         strcpy(parent_path, "/");
-        strcpy(child_name, path + 1);
+        strcpy(child_name, clean_path + 1);
     } else {
-        size_t len = last_slash - path;
-        strncpy(parent_path, path, len);
+        size_t len = last_slash - clean_path;
+        strncpy(parent_path, clean_path, len);
         parent_path[len] = '\0';
         strcpy(child_name, last_slash + 1);
     }
@@ -293,23 +313,28 @@ int vfs_bind(const char *source, const char *target) {
     if (!curthread || !curthread->t_proc) return -ESRCH;
     struct proc *p = curthread->t_proc;
 
+    char clean_source[256];
+    char clean_target[256];
+    sanitize_path(source, clean_source, sizeof(clean_source));
+    sanitize_path(target, clean_target, sizeof(clean_target));
+
     struct vnode *src_vn = NULL;
-    int err = vfs_lookup(source, p->p_cwd, &src_vn);
+    int err = vfs_lookup(clean_source, p->p_cwd, &src_vn);
     if (err != 0) return err;
 
     char parent_path[256];
     char child_name[256];
     
-    const char *last_slash = strrchr(target, '/');
+    const char *last_slash = strrchr(clean_target, '/');
     if (!last_slash) {
         strcpy(parent_path, ".");
-        strcpy(child_name, target);
-    } else if (last_slash == target) {
+        strcpy(child_name, clean_target);
+    } else if (last_slash == clean_target) {
         strcpy(parent_path, "/");
-        strcpy(child_name, target + 1);
+        strcpy(child_name, clean_target + 1);
     } else {
-        size_t len = last_slash - target;
-        strncpy(parent_path, target, len);
+        size_t len = last_slash - clean_target;
+        strncpy(parent_path, clean_target, len);
         parent_path[len] = '\0';
         strcpy(child_name, last_slash + 1);
     }
@@ -345,6 +370,107 @@ int vfs_bind(const char *source, const char *target) {
     vput(src_vn);
     vput(parent_vn);
     return 0;
+}
+
+int vfs_unlink(const char *path) {
+    if (!curthread || !curthread->t_proc) return -ESRCH;
+    struct proc *p = curthread->t_proc;
+
+    char clean_path[256];
+    sanitize_path(path, clean_path, sizeof(clean_path));
+
+    char parent_path[256];
+    char child_name[256];
+    
+    const char *last_slash = strrchr(clean_path, '/');
+    if (!last_slash) {
+        strcpy(parent_path, ".");
+        strcpy(child_name, clean_path);
+    } else if (last_slash == clean_path) {
+        strcpy(parent_path, "/");
+        strcpy(child_name, clean_path + 1);
+    } else {
+        size_t len = last_slash - clean_path;
+        strncpy(parent_path, clean_path, len);
+        parent_path[len] = '\0';
+        strcpy(child_name, last_slash + 1);
+    }
+
+    struct vnode *dvp = NULL;
+    int err = vfs_lookup(parent_path, p->p_cwd, &dvp);
+    if (err != 0) return err;
+
+    if (dvp->ops->remove) {
+        err = dvp->ops->remove(dvp, child_name);
+    } else {
+        err = -ENOTSUP;
+    }
+
+    vput(dvp);
+    return err;
+}
+
+int vfs_rename(const char *oldpath, const char *newpath) {
+    if (!curthread || !curthread->t_proc) return -ESRCH;
+    struct proc *p = curthread->t_proc;
+
+    char clean_old[256];
+    char clean_new[256];
+    sanitize_path(oldpath, clean_old, sizeof(clean_old));
+    sanitize_path(newpath, clean_new, sizeof(clean_new));
+
+    char old_parent[256];
+    char old_child[256];
+    const char *last_slash_old = strrchr(clean_old, '/');
+    if (!last_slash_old) {
+        strcpy(old_parent, ".");
+        strcpy(old_child, clean_old);
+    } else if (last_slash_old == clean_old) {
+        strcpy(old_parent, "/");
+        strcpy(old_child, clean_old + 1);
+    } else {
+        size_t len = last_slash_old - clean_old;
+        strncpy(old_parent, clean_old, len);
+        old_parent[len] = '\0';
+        strcpy(old_child, last_slash_old + 1);
+    }
+
+    char new_parent[256];
+    char new_child[256];
+    const char *last_slash_new = strrchr(clean_new, '/');
+    if (!last_slash_new) {
+        strcpy(new_parent, ".");
+        strcpy(new_child, clean_new);
+    } else if (last_slash_new == clean_new) {
+        strcpy(new_parent, "/");
+        strcpy(new_child, clean_new + 1);
+    } else {
+        size_t len = last_slash_new - clean_new;
+        strncpy(new_parent, clean_new, len);
+        new_parent[len] = '\0';
+        strcpy(new_child, last_slash_new + 1);
+    }
+
+    struct vnode *sdvp = NULL;
+    int err = vfs_lookup(old_parent, p->p_cwd, &sdvp);
+    if (err != 0) return err;
+
+    struct vnode *tdvp = NULL;
+    err = vfs_lookup(new_parent, p->p_cwd, &tdvp);
+    if (err != 0) {
+        vput(sdvp);
+        return err;
+    }
+
+    if (sdvp->ops->rename) {
+        err = sdvp->ops->rename(sdvp, old_child, tdvp, new_child);
+    } else {
+        err = -ENOTSUP;
+    }
+
+    vput(sdvp);
+    vput(tdvp);
+    return err;
 }
 
 subsys_initcall(vfs_init);

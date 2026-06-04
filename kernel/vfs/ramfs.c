@@ -326,6 +326,49 @@ int ramfs_getattr(struct vnode *vp, struct stat *st) {
     return 0;
 }
 
+int ramfs_rename(struct vnode *sdvp, const char *sname, struct vnode *tdvp, const char *dname) {
+    struct ramfs_node *snode = (struct ramfs_node *)sdvp->data;
+    struct ramfs_node *tnode = (struct ramfs_node *)tdvp->data;
+
+    struct ramfs_entry **sprev = &snode->entries;
+    struct ramfs_entry *scurr = snode->entries;
+    struct ramfs_entry *found_entry = NULL;
+
+    while (scurr) {
+        if (strcmp(scurr->name, sname) == 0) {
+            found_entry = scurr;
+            break;
+        }
+        sprev = &scurr->next;
+        scurr = scurr->next;
+    }
+    if (!found_entry) return -ENOENT;
+
+    struct ramfs_entry **tprev = &tnode->entries;
+    struct ramfs_entry *tcurr = tnode->entries;
+    while (tcurr) {
+        if (strcmp(tcurr->name, dname) == 0) {
+            *tprev = tcurr->next;
+            struct ramfs_node *fnode = (struct ramfs_node *)tcurr->vn->data;
+            fnode->unlinked = 1;
+            vput(tcurr->vn);
+            kfree(tcurr);
+            break;
+        }
+        tprev = &tcurr->next;
+        tcurr = tcurr->next;
+    }
+
+    *sprev = found_entry->next;
+
+    strncpy(found_entry->name, dname, 255);
+    found_entry->name[255] = '\0';
+    found_entry->next = tnode->entries;
+    tnode->entries = found_entry;
+
+    return 0;
+}
+
 struct vnode_ops ramfs_ops = {
     .lookup   = ramfs_lookup,
     .create   = ramfs_create,
@@ -336,4 +379,5 @@ struct vnode_ops ramfs_ops = {
     .remove   = ramfs_remove,
     .getattr  = ramfs_getattr,
     .readdir  = ramfs_readdir,
+    .rename   = ramfs_rename,
 };

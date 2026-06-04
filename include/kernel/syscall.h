@@ -20,6 +20,8 @@ int64_t sys_read(int fd, void *user_buf, size_t count);
 int64_t sys_write(int fd, const void *user_buf, size_t count);
 int64_t sys_open(const char *user_path, int flags, int mode);
 int64_t sys_mkdir(const char *user_path, int mode);
+int64_t sys_unlink(const char *user_path);
+int64_t sys_rename(const char *user_old, const char *user_new);
 int64_t sys_close(int fd);
 int64_t sys_fstat(int fd, void *user_stat);
 int64_t sys_lseek(int fd, int64_t offset, int whence);
