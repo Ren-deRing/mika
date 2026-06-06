@@ -48,4 +48,4 @@ extern initcall_t __ap_initcall_start[];
 extern initcall_t __ap_initcall_end[];
 
 void early_init(uint32_t hw_id);
-void ap_early_init(uint32_t hw_id);
+void ap_early_init(uint32_t logic_id, uint32_t hw_id);

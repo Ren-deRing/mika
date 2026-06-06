@@ -17,6 +17,7 @@ struct vnode_ops {
     int (*close)(struct vnode *vp);
     ssize_t (*read)(struct vnode *vp, void *buf, size_t n, off_t off);
     ssize_t (*write)(struct vnode *vp, const void *buf, size_t n, off_t off);
+    int (*ioctl)(struct vnode *vp, uint64_t request, void *arg);
     int (*getattr)(struct vnode *vp, struct stat *st);
     int (*setattr)(struct vnode *vp, struct stat *st);
     int (*readdir)(struct vnode *vp, void *dirent_buf, size_t count, off_t *off);

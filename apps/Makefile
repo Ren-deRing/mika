@@ -7,14 +7,14 @@ export MUSL_OUT_DIR ?= $(BASE_DIR)/build/musl
 export USER_BIN_DIR ?= $(BASE_DIR)/build/rootfs/bin
 
 export APPS_CC      := clang -target $(ARCH)-unknown-none-elf
-export APPS_CFLAGS  := -g -O2 -ffreestanding -fno-stack-protector \
-                       -fno-pic -fno-pie -fno-omit-frame-pointer \
+export APPS_CFLAGS  := -g -O2 -fno-strict-aliasing -ffreestanding -fno-stack-protector \
+                       -fPIE -fno-omit-frame-pointer \
                        -m64 -march=x86-64 -mno-red-zone \
                        -I$(BASE_DIR)/user/include \
                        -I$(MUSL_OUT_DIR)/include
 
-export APPS_LDFLAGS := -fuse-ld=lld -nostdlib -static \
-                       -Wl,-Ttext,0x400000 \
+export APPS_LDFLAGS := -fuse-ld=lld -nostdlib -pie \
+                       -Wl,-dynamic-linker,/lib/ld-musl-x86_64.so.1 \
                        -Wl,-z,separate-code -Wl,-z,max-page-size=0x1000
 
 export APPS_LIBS    := $(MUSL_OUT_DIR)/lib/crt1.o \

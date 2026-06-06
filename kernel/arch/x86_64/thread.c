@@ -35,6 +35,41 @@ struct thread* arch_init_first_thread(void) {
     return t0;
 }
 
+struct thread* arch_init_ap_thread(uint32_t cpu_id) {
+    struct proc *p0 = find_proc(0);
+    if (!p0) return NULL;
+
+    struct thread *t = kmalloc_aligned(sizeof(struct thread), 64);
+    memset(t, 0, sizeof(struct thread));
+
+    void *new_stack = kmalloc_aligned(KSTACK_SIZE, KSTACK_SIZE);
+    t->t_kstack = new_stack;
+    t->t_tid = 0;
+    t->t_proc = p0;
+
+    uint64_t flags = spin_lock_irqsave(&p0->p_lock);
+    t->t_proc_next = p0->p_threads;
+    p0->p_threads = t;
+    spin_unlock_irqrestore(&p0->p_lock, flags);
+
+    t->t_state = THREAD_RUNNING;
+    t->t_fs_base = 0;
+
+    t->t_arch_data = kmalloc_aligned(g_xsave_size, 64);
+    memset(t->t_arch_data, 0, g_xsave_size);
+
+    struct cpu *c = &cpus[cpu_id];
+    c->self = c;
+    c->idle = t;
+    c->current_thread = t;
+    c->tss_rsp0 = (uintptr_t)t->t_kstack + KSTACK_SIZE;
+
+    proc_put(p0);
+
+    return t;
+}
+
+
 int arch_proc_init(struct proc *p) {
     struct arch_proc *ap = kmalloc(sizeof(struct arch_proc));
     if (!ap) return -ENOMEM;

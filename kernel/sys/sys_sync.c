@@ -130,3 +130,60 @@ int64_t sys_arch_prctl(int code, uintptr_t addr) {
 
     return -EINVAL;
 }
+
+int64_t sys_nanosleep(const struct timespec *user_req, struct timespec *user_rem) {
+    if (!is_user_address_range(user_req, sizeof(struct timespec))) {
+        return -EFAULT;
+    }
+
+    struct timespec req;
+    if (copy_from_user(&req, user_req, sizeof(struct timespec)) < 0) {
+        return -EFAULT;
+    }
+
+    if (req.tv_sec < 0 || req.tv_nsec < 0 || req.tv_nsec >= 1000000000) {
+        return -EINVAL;
+    }
+
+    if (req.tv_sec == 0 && req.tv_nsec == 0) {
+        return 0;
+    }
+
+    uint64_t sec_limit = (uint64_t)-1 / 1000 - 1;
+    uint64_t ms;
+    if ((uint64_t)req.tv_sec > sec_limit) {
+        ms = (uint64_t)-1 - 1000;
+    } else {
+        ms = (uint64_t)req.tv_sec * 1000 + (req.tv_nsec + 999999) / 1000000;
+    }
+
+    uint64_t start_ticks = arch_get_system_ticks();
+    uint64_t max_ms = (uint64_t)-1 - start_ticks - 1000;
+    if (ms > max_ms) {
+        ms = max_ms;
+    }
+
+    uint64_t target_ticks = start_ticks + ms;
+
+    thread_sleep(ms);
+
+    uint64_t end_ticks = arch_get_system_ticks();
+    if (end_ticks < target_ticks) {
+        if (user_rem) {
+            if (!is_user_address_range(user_rem, sizeof(struct timespec))) {
+                return -EFAULT;
+            }
+            uint64_t remaining_ticks = target_ticks - end_ticks;
+            struct timespec rem;
+            rem.tv_sec = remaining_ticks / 1000;
+            rem.tv_nsec = (remaining_ticks % 1000) * 1000000;
+            if (copy_to_user(user_rem, &rem, sizeof(struct timespec)) < 0) {
+                return -EFAULT;
+            }
+        }
+        return -EINTR;
+    }
+
+    return 0;
+}
+

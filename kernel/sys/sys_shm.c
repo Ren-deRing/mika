@@ -199,7 +199,7 @@ void* sys_shmat(int shmid, const void *shmaddr, int shmflg) {
         }
     }
 
-    uint64_t map_flags = MMU_FLAGS_USER | MMU_FLAGS_READ;
+    uint64_t map_flags = MMU_FLAGS_USER | MMU_FLAGS_READ | MMU_FLAGS_SHARED;
     if (!(shmflg & SHM_RDONLY)) {
         map_flags |= MMU_FLAGS_WRITE;
     }
@@ -427,16 +427,6 @@ void shm_fork_copy(struct proc *parent, struct proc *child) {
 
                 if (seg) {
                     seg->ds.shm_nattch++;
-
-                    uint64_t map_flags = MMU_FLAGS_USER | MMU_FLAGS_READ | MMU_FLAGS_WRITE;
-
-                    for (size_t p = 0; p < seg->num_pages; p++) {
-                        uintptr_t phys_addr = page_to_phys(seg->pages[p]);
-                        uintptr_t vaddr = addr + (p * PAGE_SIZE);
-
-                        mmu_map_4k(child->p_vm_map, vaddr, phys_addr, map_flags);
-                        mmu_map_4k(parent->p_vm_map, vaddr, phys_addr, map_flags);
-                    }
                 }
             }
         }

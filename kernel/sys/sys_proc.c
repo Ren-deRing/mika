@@ -8,6 +8,7 @@
 #include <kernel/exec.h>
 #include <kernel/list.h>
 #include <kernel/syscall.h>
+#include <uapi/elf.h>
 
 #include <kernel/fs/vfs.h>
 #include <kernel/fs/vnode.h>
@@ -29,12 +30,20 @@ int64_t sys_clone(uint64_t flags, void *child_stack, void *ptid, void *ctid, uin
     int *child_tid = (int *)ctid;
 
     if (curthread->t_arch_data) {
-        uint32_t eax = 0xFFFFFFFF;
-        uint32_t edx = 0xFFFFFFFF;
-        asm volatile("xsaveq (%0)" 
-                     : 
-                     : "r"(curthread->t_arch_data), "a"(eax), "d"(edx) 
-                     : "memory");
+        extern bool g_use_xsave;
+        if (g_use_xsave) {
+            uint32_t eax = 0xFFFFFFFF;
+            uint32_t edx = 0xFFFFFFFF;
+            asm volatile("xsaveq (%0)" 
+                         : 
+                         : "r"(curthread->t_arch_data), "a"(eax), "d"(edx) 
+                         : "memory");
+        } else {
+            asm volatile("fxsave (%0)"
+                         :
+                         : "r"(curthread->t_arch_data)
+                         : "memory");
+        }
     }
 
     if (flags & CLONE_THREAD) {
@@ -205,12 +214,20 @@ int64_t sys_clone(uint64_t flags, void *child_stack, void *ptid, void *ctid, uin
 
 int64_t sys_fork(void) {
     if (curthread->t_arch_data) {
-        uint32_t eax = 0xFFFFFFFF;
-        uint32_t edx = 0xFFFFFFFF;
-        asm volatile("xsaveq (%0)" 
-                     : 
-                     : "r"(curthread->t_arch_data), "a"(eax), "d"(edx) 
-                     : "memory");
+        extern bool g_use_xsave;
+        if (g_use_xsave) {
+            uint32_t eax = 0xFFFFFFFF;
+            uint32_t edx = 0xFFFFFFFF;
+            asm volatile("xsaveq (%0)" 
+                         : 
+                         : "r"(curthread->t_arch_data), "a"(eax), "d"(edx) 
+                         : "memory");
+        } else {
+            asm volatile("fxsave (%0)"
+                         :
+                         : "r"(curthread->t_arch_data)
+                         : "memory");
+        }
     }
 
     struct proc *parent_p = curproc;
@@ -364,7 +381,7 @@ int64_t sys_set_tid_address(int *tidptr) {
 
 int64_t sys_execve(const char *user_path, char *const argv[], char *const envp[]) {
     char kpath[256];
-    if (copy_from_user(kpath, user_path, 256) < 0) {
+    if (copy_str_from_user(kpath, user_path, 256) < 0) {
         return -EFAULT;
     }
 
@@ -404,12 +421,15 @@ int64_t sys_execve(const char *user_path, char *const argv[], char *const envp[]
     }
 
     vput(vn); 
-
+    Elf64_Ehdr *ehdr = (Elf64_Ehdr *)elf_data;
+    uintptr_t main_binary_base = (ehdr->e_type == ET_DYN) ? 0x00400000 : 0;
+    uintptr_t original_entry = ehdr->e_entry + main_binary_base;
     uintptr_t entry_point = 0;
     uintptr_t brk = 0;
     uintptr_t phdr_vaddr = 0;
     uint64_t phnum = 0;
-    page_table_t *new_map = load_elf(elf_data, &entry_point, &brk, &phdr_vaddr, &phnum);
+    uintptr_t interpreter_base = 0;
+    page_table_t *new_map = load_elf(elf_data, &entry_point, &brk, &phdr_vaddr, &phnum, &interpreter_base);
     
     kfree(elf_data);
     
@@ -433,7 +453,7 @@ int64_t sys_execve(const char *user_path, char *const argv[], char *const envp[]
         mmu_map(new_map, curr, paddr, MMU_FLAGS_USER | MMU_FLAGS_WRITE);
     }
 
-    uintptr_t final_user_rsp = setup_user_stack(new_map, USER_STACK_TOP, argv, envp, phdr_vaddr, phnum);
+    uintptr_t final_user_rsp = setup_user_stack(new_map, USER_STACK_TOP, argv, envp, phdr_vaddr, phnum, interpreter_base, original_entry);
     if (final_user_rsp == 0 || (final_user_rsp % 16) != 0) {
         dprintf("setup_user_stack FAILED. Misaligned RSP: %p\n", final_user_rsp);
         mmu_destroy_map(new_map);

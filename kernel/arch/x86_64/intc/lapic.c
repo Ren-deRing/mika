@@ -134,6 +134,9 @@ void ap_lapic_init(void) {
     if (g_intc && g_intc->init_local) {
         g_intc->init_local();
     }
+    if (g_intc && g_intc->start_timer) {
+        g_intc->start_timer(1, 0x40);
+    }
 }
 
 dev_initcall(lapic_controller_init, PRIO_SECOND);

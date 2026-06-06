@@ -14,6 +14,7 @@
 #define MMU_FLAGS_EXEC     (1ULL << 2)
 #define MMU_FLAGS_USER     (1ULL << 3)
 #define MMU_FLAGS_NOCACHE  (1ULL << 4)
+#define MMU_FLAGS_SHARED   (1ULL << 5)
 
 #define ALIGN_DOWN(addr, align) ((uintptr_t)(addr) & ~((uintptr_t)(align) - 1))
 #define ALIGN_UP(addr, align)   (((uintptr_t)(addr) + (uintptr_t)(align) - 1) & ~((uintptr_t)(align) - 1))
@@ -63,3 +64,7 @@ page_table_t* mmu_get_kernel_map(void);
 
 page_table_t* mmu_create_map(void);
 void mmu_destroy_map(page_table_t* map);
+
+void mmu_flush_cache(void* addr, size_t size);
+
+void mmu_tlb_shootdown(void);

@@ -66,7 +66,6 @@ void keyboard_init(void) {
     outb(0x64, 0x20);
     kbd_wait_read();
     uint8_t config = inb(0x60);
-    dprintf("[KBD] Current 8042 config: 0x%02X\n", config);
 
     config |= 0x01;
     config &= ~0x10;

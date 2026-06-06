@@ -3,18 +3,29 @@
 #include "build/gen/asm_defines.h"
 
 .global arch_start_thread
+.global arch_start_ap_thread
 .global arch_context_switch
 .global thread_bootstrap
 .global arch_enter_user_mode
 .global fork_child_ret
 
 .extern generic_main
+.extern ap_main
+.extern g_use_xsave
+.extern thread_post_switch_hook
 
 arch_start_thread:
     movq 16(%rdi), %rsp # rsp = t0->t_kstack
     addq $8192, %rsp    # rsp += KSTACK_SIZE
 
     jmp generic_main
+
+arch_start_ap_thread:
+    movq 16(%rdi), %rsp # rsp = t->t_kstack
+    addq $8192, %rsp    # rsp += KSTACK_SIZE
+
+    jmp ap_main
+
 
 arch_context_switch:
     pushq %rbp
@@ -27,9 +38,14 @@ arch_context_switch:
     movq THREAD_ARCH_DATA(%rdi), %rcx
     testq %rcx, %rcx
     jz .Lno_xsave
+    cmpb $0, g_use_xsave(%rip)
+    jz .Luse_fxsave
     movl $0xFFFFFFFF, %eax
     movl $0xFFFFFFFF, %edx
     xsaveq (%rcx)
+    jmp .Lno_xsave
+.Luse_fxsave:
+    fxsave (%rcx)
 .Lno_xsave:
 
     movq %rsp, 24(%rdi)
@@ -39,9 +55,14 @@ arch_context_switch:
     movq THREAD_ARCH_DATA(%rsi), %rcx
     testq %rcx, %rcx
     jz .Lno_xrstor
+    cmpb $0, g_use_xsave(%rip)
+    jz .Luse_fxrstor
     movl $0xFFFFFFFF, %eax
     movl $0xFFFFFFFF, %edx
     xrstorq (%rcx)
+    jmp .Lno_xrstor
+.Luse_fxrstor:
+    fxrstor (%rcx)
 .Lno_xrstor:
 
     # Restore FS_BASE
@@ -68,6 +89,8 @@ arch_context_switch:
     
 
 thread_bootstrap:
+    call thread_post_switch_hook
+
     sti
 
     movq %r13, %rdi
@@ -111,6 +134,7 @@ arch_enter_user_mode:  # rdi=entry, rsi=user_rsp
     iretq
 
 fork_child_ret:
+    call thread_post_switch_hook
     call fork_child_switch_mm
     
     movq %gs:CPU_CURRENT_THREAD, %rax

@@ -21,17 +21,24 @@ void arch_user_trampoline(void *arg) {
     arch_set_kernel_stack((uintptr_t)self->t_kstack + KSTACK_SIZE);
     
     arch_switch_mm(NULL, p); 
-    
     arch_enter_user_mode(p->p_entry, p->p_stack_top);
 }
 
 int proc_exec(void *elf_data, char *const argv[], char *const envp[]) {
+    Elf64_Ehdr *ehdr = (Elf64_Ehdr *)elf_data;
+    if (ehdr->e_type != ET_DYN) {
+        dprintf("[KERNEL proc_exec] Static/Non-PIE binaries are not supported.\n");
+        return -ENOEXEC;
+    }
+    uintptr_t main_binary_base = 0x00400000;
+    uintptr_t original_entry = ehdr->e_entry + main_binary_base;
     uintptr_t entry_point = 0;
     uintptr_t brk = 0;
     uintptr_t phdr_vaddr = 0;
     uint64_t phnum = 0;
+    uintptr_t interpreter_base = 0;
 
-    page_table_t *new_map = load_elf(elf_data, &entry_point, &brk, &phdr_vaddr, &phnum);
+    page_table_t *new_map = load_elf(elf_data, &entry_point, &brk, &phdr_vaddr, &phnum, &interpreter_base);
     if (!new_map) {
         return -ENOEXEC;
     }
@@ -56,7 +63,7 @@ int proc_exec(void *elf_data, char *const argv[], char *const envp[]) {
         mmu_map(new_map, curr, paddr, MMU_FLAGS_USER | MMU_FLAGS_WRITE | MMU_FLAGS_EXEC);
     }
 
-    uintptr_t final_rsp = setup_user_stack(new_map, USER_STACK_TOP, argv, envp, phdr_vaddr, phnum);
+    uintptr_t final_rsp = setup_user_stack(new_map, USER_STACK_TOP, argv, envp, phdr_vaddr, phnum, interpreter_base, original_entry);
 
     p->p_vm_map = new_map;
     p->p_entry = entry_point;
@@ -80,14 +87,17 @@ int proc_exec(void *elf_data, char *const argv[], char *const envp[]) {
 
 #define AT_NULL    0
 #define AT_PHDR    3
-#define AT_PHNUM   4
-#define AT_PHENT   5
+#define AT_PHENT   4
+#define AT_PHNUM   5
 #define AT_PAGESZ  6
+#define AT_BASE    7
+#define AT_ENTRY   9
 #define AT_RANDOM 25
 
 uintptr_t setup_user_stack(page_table_t *new_map, uintptr_t user_stack_top, 
                            char *const argv[], char *const envp[],
-                           uintptr_t phdr_vaddr, uint64_t phnum) {
+                           uintptr_t phdr_vaddr, uint64_t phnum,
+                           uintptr_t interpreter_base, uintptr_t original_entry) {
     uint8_t *kbuf = kmalloc(TMP_STACK_SIZE);
     memset(kbuf, 0, TMP_STACK_SIZE);
 
@@ -98,7 +108,7 @@ uintptr_t setup_user_stack(page_table_t *new_map, uintptr_t user_stack_top,
     for (int i = 0; i < argc; i++) { strings_size += strlen(argv[i]) + 1; }
     for (int i = 0; i < envc; i++) { strings_size += strlen(envp[i]) + 1; }
 
-    size_t table_elements = 1 + argc + 1 + envc + 1 + 12;
+    size_t table_elements = 1 + argc + 1 + envc + 1 + 16;
     size_t table_bytes = table_elements * sizeof(uintptr_t);
 
     size_t total_pure_size = table_bytes + strings_size;
@@ -149,10 +159,17 @@ uintptr_t setup_user_stack(page_table_t *new_map, uintptr_t user_stack_top,
     
     k_table[table_idx++] = AT_PAGESZ;
     k_table[table_idx++] = 4096;
+
+    if (interpreter_base != 0) {
+        k_table[table_idx++] = AT_BASE;
+        k_table[table_idx++] = interpreter_base;
+
+        k_table[table_idx++] = AT_ENTRY;
+        k_table[table_idx++] = original_entry;
+    }
     
     k_table[table_idx++] = AT_NULL;
     k_table[table_idx++] = 0;
-
     uintptr_t copy_dest_u = final_user_rsp;
     size_t remain = total_payload_size;
     size_t offset_in_payload = 0;
@@ -163,9 +180,10 @@ uintptr_t setup_user_stack(page_table_t *new_map, uintptr_t user_stack_top,
         size_t to_copy = MIN(remain, PAGE_SIZE - off_in_page);
 
         void *src_addr = (void *)(curr_kbuf + offset_in_payload);
-        void *dst_addr = (void *)p2v(phys);
+        void *dst_addr = (void *)(p2v(phys & ~(PAGE_SIZE - 1)) + off_in_page);
 
         memcpy(dst_addr, src_addr, to_copy);
+        mmu_flush_cache(dst_addr, to_copy);
 
         remain -= to_copy;
         offset_in_payload += to_copy;

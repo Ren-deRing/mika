@@ -92,7 +92,11 @@ isr_common_stub:
     testb $3, (15*8 + 24)(%rsp)
     jz .skip_tf_update
     movq %gs:0, %rax
+    testq %rax, %rax
+    jz .skip_tf_update
     movq CPU_CURRENT_THREAD(%rax), %rax # curthread
+    testq %rax, %rax
+    jz .skip_tf_update
     movq %rsp, THREAD_TRAPFRAME(%rax)
 
 .skip_tf_update:
@@ -100,7 +104,11 @@ isr_common_stub:
     call isr_handler
 
     movq %gs:0, %rax
+    testq %rax, %rax
+    jz restore_and_exit
     movq 32(%rax), %rax # rax = curthread
+    testq %rax, %rax
+    jz restore_and_exit
 
     cmpb $1, 64(%rax)
     jne restore_and_exit
@@ -109,7 +117,11 @@ isr_common_stub:
     call mi_switch
 
     movq %gs:0, %rax
+    testq %rax, %rax
+    jz .skip_rsp_restore
     movq 32(%rax), %rax
+    testq %rax, %rax
+    jz .skip_rsp_restore
 
     testb $3, 144(%rsp)
     jz .skip_rsp_restore

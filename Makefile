@@ -75,20 +75,20 @@ download:
 		echo "Downloading musl source..."; \
 		rm -rf $(MUSL_DIR); \
 		mkdir -p $(MUSL_DIR); \
-		wget https://musl.libc.org/releases/musl-1.1.24.tar.gz; \
-		tar -xf musl-1.1.24.tar.gz -C $(MUSL_DIR) --strip-components=1; \
-		rm musl-1.1.24.tar.gz; \
+		wget https://musl.libc.org/releases/musl-1.2.6.tar.gz; \
+		tar -xf musl-1.2.6.tar.gz -C $(MUSL_DIR) --strip-components=1; \
+		rm musl-1.2.6.tar.gz; \
 	fi
 
 musl_build: download
 	@if [ ! -f "$(MUSL_OUT_DIR)/lib/libc.a" ]; then \
 		echo "[MUSL] Configuring and building musl libc..."; \
 		cd $(MUSL_DIR) && \
-		CC="clang -target $(ARCH)-unknown-none-elf" \
+		CC="clang -target $(ARCH)-pc-linux-musl" \
 		CFLAGS="-g -O2 -ffreestanding -fno-stack-protector -m64 -march=x86-64 -mno-red-zone" \
-		./configure --prefix=$(MUSL_OUT_DIR) --disable-shared --enable-static && \
-		$(MAKE) -j$$(nproc) && \
-		$(MAKE) install; \
+		LDFLAGS="-fuse-ld=lld" ./configure --prefix=$(MUSL_OUT_DIR) --enable-shared --enable-static && \
+		$(MAKE) -j$$(nproc) LDFLAGS="-fuse-ld=lld" && \
+		$(MAKE) install LDFLAGS="-fuse-ld=lld"; \
 	fi
 
 setup: musl_build
@@ -108,6 +108,9 @@ iso: all
 	@if [ -d "$(USER_BIN_DIR)" ]; then \
 		cp -rv $(USER_BIN_DIR)/* $(INITRD_TEMP)/bin/ 2>/dev/null || true; \
 	fi
+	@mkdir -p $(INITRD_TEMP)/lib
+	@cp -v $(MUSL_OUT_DIR)/lib/libc.so $(INITRD_TEMP)/lib/libc.so
+	@cp -v $(MUSL_OUT_DIR)/lib/libc.so $(INITRD_TEMP)/lib/ld-musl-x86_64.so.1
 
 	@cd $(INITRD_TEMP) && find . -mindepth 1 | cpio -o -H newc > $(INITRD_IMG)
 
@@ -136,7 +139,7 @@ run: iso
 		-m 8G \
 		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
 		-bios /usr/share/ovmf/OVMF.fd \
-		-serial stdio -d int,cpu_reset -smp 1 -accel kvm -cpu host
+		-serial stdio -d int,cpu_reset -smp 4 -accel kvm -cpu host
 
 clean:
 	rm -rf $(BUILD_DIR) $(BIN_DIR)

@@ -120,8 +120,8 @@ void panic(const char* description, struct trapframe *regs) {
 
 void idt_install(void) {
     for (int i = 0; i < 256; i++) {
-        uint8_t ist_index = (i == 8) ? 1 : 0;
-        if (i == 8 || i == 14) ist_index = 1;
+        uint8_t ist_index = 0;
+        if (i == 8) ist_index = 1;
         idt_set_descriptor(i, (void*)isr_stub_table[i], 0x8E, ist_index);
     }
 

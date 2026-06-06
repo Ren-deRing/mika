@@ -89,7 +89,7 @@ void check_signals(struct trapframe *tf) {
             sig == SIGSEGV || sig == SIGILL || sig == SIGFPE || sig == SIGBUS || sig == SIGABRT) {
             
             spin_unlock_irqrestore(&curthread->t_proc->p_lock, flags);
-            dprintf("[SIGNAL] Process %d killed by signal %d\n", curthread->t_proc->p_pid, sig);
+            dprintf("[SIGNAL] Process %d killed by signal %d at RIP=0x%lx\n", curthread->t_proc->p_pid, sig, tf->rip);
             sys_exit(128 + sig);
             return;
         }

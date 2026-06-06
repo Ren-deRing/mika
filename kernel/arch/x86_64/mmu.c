@@ -16,6 +16,7 @@
 #include <kernel/mmu.h>
 #include <kernel/sched.h>
 #include <kernel/lock.h>
+#include <kernel/intc.h>
 
 static spinlock_t g_mmu_lock = SPINLOCK_INITIALIZER;
 
@@ -36,6 +37,7 @@ void handle_page_fault(struct trapframe *regs, void *data);
 #define X86_PTE_GLOBAL   (1ULL << 8)
 #define X86_PTE_NX       (1ULL << 63)
 #define X86_PTE_COW      (1ULL << 9)
+#define X86_PTE_SHARED   (1ULL << 10)
 
 #define PAGE_ADDR_MASK   0x000ffffffffff000ull
 
@@ -663,6 +665,7 @@ static uint64_t mmu_to_x86_flags(uint64_t prot) {
     if (prot & MMU_FLAGS_WRITE)   flags |= X86_PTE_WRITABLE;
     if (prot & MMU_FLAGS_USER)    flags |= X86_PTE_USER;
     if (prot & MMU_FLAGS_NOCACHE) flags |= (X86_PTE_PCD | X86_PTE_PWT);
+    if (prot & MMU_FLAGS_SHARED)  flags |= X86_PTE_SHARED;
     
     if (!(prot & MMU_FLAGS_EXEC)) flags |= X86_PTE_NX;
 
@@ -699,6 +702,10 @@ bool mmu_map(page_table_t* map, uintptr_t vaddr, uintptr_t paddr, uint64_t prot)
     }
 
     spin_unlock_irqrestore(&g_mmu_lock, lock_flags);
+
+    if (ret) {
+        mmu_tlb_shootdown();
+    }
     return ret;
 }
 
@@ -707,6 +714,10 @@ bool mmu_map_4k(page_table_t* map, uintptr_t vaddr, uintptr_t paddr, uint64_t pr
     uint64_t lock_flags = spin_lock_irqsave(&g_mmu_lock);
     bool ret = vmm_map(map, (uint64_t)vaddr, (uint64_t)paddr, x86_flags);
     spin_unlock_irqrestore(&g_mmu_lock, lock_flags);
+
+    if (ret) {
+        mmu_tlb_shootdown();
+    }
     return ret;
 }
 
@@ -714,6 +725,8 @@ void mmu_unmap(page_table_t* map, uintptr_t vaddr) {
     uint64_t lock_flags = spin_lock_irqsave(&g_mmu_lock);
     vmm_unmap(map, (uint64_t)vaddr);
     spin_unlock_irqrestore(&g_mmu_lock, lock_flags);
+
+    mmu_tlb_shootdown();
 }
 
 uintptr_t mmu_translate(page_table_t* map, uintptr_t vaddr) {
@@ -743,6 +756,10 @@ void mmu_protect_page(page_table_t* map, uintptr_t vaddr, int prot) {
 
         if (!(prot & 0x4)) {
             new_flags |= X86_PTE_NX;
+        }
+
+        if (*pte & X86_PTE_SHARED) {
+            new_flags |= X86_PTE_SHARED;
         }
 
         uint64_t paddr_mask = 0x000FFFFFFFFFF000ULL;
@@ -807,14 +824,14 @@ page_table_t *mmu_clone_map(page_table_t *parent_map) {
                     uint64_t flags = pte & ~PAGE_ADDR_MASK;
 
                     if (flags & X86_PTE_WRITABLE) {
-                        // Make parent page read-only and mark as CoW
-                        flags &= ~X86_PTE_WRITABLE;
-                        flags |= X86_PTE_COW;
-                        pt->entries[l] = parent_phys | flags;
-                        invlpg((uint64_t)va);
+                        if (!(flags & X86_PTE_SHARED)) {
+                            flags &= ~X86_PTE_WRITABLE;
+                            flags |= X86_PTE_COW;
+                            pt->entries[l] = parent_phys | flags;
+                            invlpg((uint64_t)va);
+                        }
                     }
 
-                    // Increment the reference count of the physical page
                     page_t *pg = phys_to_page(parent_phys);
                     if (pg) {
                         pg->ref_count++;
@@ -915,6 +932,25 @@ void handle_page_fault(struct trapframe *regs, void *data) {
     }
 
     panic("Segmentation Fault", regs);
+}
+
+void mmu_flush_cache(void* addr, size_t size) {
+    uintptr_t start = (uintptr_t)addr;
+    uintptr_t end = start + size;
+    for (uintptr_t curr = start & ~63UL; curr < end; curr += 64) {
+        asm volatile("clflush (%0)" : : "r"(curr) : "memory");
+    }
+}
+
+void mmu_tlb_shootdown(void) {
+    if (g_intc && g_intc->send_ipi) {
+        struct cpu *this_cpu = curcpu;
+        for (uint32_t i = 0; i < g_boot_info.smp.total_cores; i++) {
+            if (i != this_cpu->id) {
+                g_intc->send_ipi(cpus[i].hw_id, 0x46);
+            }
+        }
+    }
 }
 
 mem_initcall(pmm_init, PRIO_FIRST);

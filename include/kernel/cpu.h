@@ -39,6 +39,8 @@ struct cpu {
     void *arch_cpu_data;
 
     kmem_magazine_t* magazines[KMEM_NUM_CLASSES];
+
+    struct thread *prev_thread;
 };
 
 #if defined(__x86_64__)
@@ -78,8 +80,11 @@ struct cpu* get_this_core(void);
 
 void arch_timer_handler(struct trapframe *regs, void *data);
 void arch_thread_setup(struct thread *t, void (*entry)(void));
+void arch_sched_init(void);
+void arch_trigger_resched(uint32_t cpu_id);
 
 struct thread* arch_init_first_thread(void);
+struct thread* arch_init_ap_thread(uint32_t cpu_id);
 void arch_set_current_thread(struct thread *t);
 
 uint64_t arch_get_system_ticks(void);

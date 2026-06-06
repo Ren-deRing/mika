@@ -9,12 +9,16 @@
 
 #include <kernel/cpu.h>
 #include <kernel/printf.h>
+#include <kernel/lock.h>
 
 #define STB_SPRINTF_IMPLEMENTATION
 
 #include <lib/stb_sprintf.h>
 
 static kprint_callback_t active_kprint_sink;
+static spinlock_t kprintf_lock = SPINLOCK_INITIALIZER;
+static volatile int kprintf_depth = 0;
+static volatile int kprintf_owner_cpu = -1;
 
 void set_output_sink(kprint_callback_t new_sink) {
     active_kprint_sink = new_sink;
@@ -28,7 +32,30 @@ void vprintf(const char* format, va_list args) {
     cpu_status_t flags;
     irq_save(flags);
 
+    struct cpu *c = curcpu;
+    int cpu_id = c ? (int)c->id : -1;
+    bool needs_unlock = false;
+
+    if (cpu_id != -1 && kprintf_owner_cpu == cpu_id) {
+        kprintf_depth++;
+    } else {
+        spin_lock(&kprintf_lock);
+        kprintf_owner_cpu = cpu_id;
+        kprintf_depth = 1;
+        needs_unlock = true;
+    }
+
     stbsp_vsprintfcb(active_kprint_sink, NULL, tmp, format, args);
+
+    if (needs_unlock) {
+        kprintf_depth--;
+        if (kprintf_depth == 0) {
+            kprintf_owner_cpu = -1;
+            spin_unlock(&kprintf_lock);
+        }
+    } else {
+        kprintf_depth--;
+    }
 
     irq_restore(flags);
 }

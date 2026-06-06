@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include <elf.h>
+#include <stdbool.h>
 
 #include "x86.h"
 
@@ -16,6 +17,7 @@ struct cpu cpus[MAX_CPUS];
 
 extern uint8_t inb(uint16_t port);
 extern void outb(uint16_t port, uint8_t val);
+extern bool g_use_xsave;
 
 void fpu_init(void) {
     uintptr_t cr0, cr4;
@@ -42,7 +44,12 @@ void xsave_init(void) {
     uintptr_t cr4;
 
     cpuid(1, 0, &eax, &ebx, &ecx, &edx);
-    if (!(ecx & (1 << 26))) return; 
+    if (!(ecx & (1 << 26))) {
+        g_use_xsave = false;
+        g_xsave_size = 512;
+        asm volatile ("fxsave (%0)" : : "r"(g_fpu_preset) : "memory");
+        return; 
+    }
 
     asm volatile ("mov %%cr4, %0" : "=r"(cr4));
     cr4 |= (1 << 18); // OSXSAVE
@@ -59,6 +66,7 @@ void xsave_init(void) {
 
     cpuid(0xD, 0, &eax, &ebx, &ecx, &edx);
     g_xsave_size = ebx;
+    g_use_xsave = true;
 
     eax = 0xFFFFFFFF;
     edx = 0xFFFFFFFF;
@@ -98,12 +106,23 @@ void cpu_init(uint32_t logic_id, uint32_t hw_id) {
     wrmsr(MSR_KERNEL_GS_BASE, (uintptr_t)c);
 }
 
+static volatile int g_serial_lock = 0;
+
 static char* log_write(const char* buffer, void* user, int size) {
     (void)user;
+
+    uint64_t flags = arch_irq_save();
+    while (__sync_lock_test_and_set(&g_serial_lock, 1)) {
+        arch_pause();
+    }
 
     for (int i = 0; i < size; ++i) {
         outb(SERIAL_DEVICE, buffer[i]);
     }
+
+    __sync_lock_release(&g_serial_lock);
+    arch_irq_restore(flags);
+
     return (char*)buffer;
 }
 
@@ -124,15 +143,11 @@ void early_init(uint32_t hw_id) {
     dprintf("%s [%s]\n", __kernel_name, __kernel_version_codename);
 }
 
-static volatile int next_id = 1;
-
-void ap_early_init(uint32_t hw_id) {
-    int id = __sync_fetch_and_add(&next_id, 1); 
-
+void ap_early_init(uint32_t logic_id, uint32_t hw_id) {
     fpu_init();
     xsave_init();
     syscall_init();
-    cpu_init(id, hw_id);
+    cpu_init(logic_id, hw_id);
 }
 
 /* Fixed: do_nothing(void)'s former kingdom... RIP 2026-2026 */

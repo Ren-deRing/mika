@@ -6,3 +6,9 @@
 .antigravitycli
 /apps/doom
 .vscode
+
+
+/apps/**/*
+!/apps/**/*/
+!/apps/**/*.*
+/apps/**/*.o

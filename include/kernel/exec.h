@@ -20,7 +20,9 @@ int proc_execpath(struct proc *p, const char *path);
 
 uintptr_t setup_user_stack(page_table_t *new_map, uintptr_t user_stack_top, 
                            char *const argv[], char *const envp[],
-                           uintptr_t phdr_vaddr, uint64_t phnum);
+                           uintptr_t phdr_vaddr, uint64_t phnum,
+                           uintptr_t interpreter_base, uintptr_t original_entry);
 
 page_table_t* load_elf(void *elf_data, uintptr_t *out_entry, uintptr_t *out_brk, 
-                      uintptr_t *out_phdr_vaddr, uint64_t *out_phnum);
+                      uintptr_t *out_phdr_vaddr, uint64_t *out_phnum,
+                      uintptr_t *out_interpreter_base);

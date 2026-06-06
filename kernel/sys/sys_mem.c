@@ -12,7 +12,6 @@
 
 int64_t sys_mmap(uintptr_t addr, size_t length, int prot, int flags, int fd, int64_t offset) {
     (void)flags;
-    (void)offset;
 
     if (length == 0) return -EINVAL;
 
@@ -42,11 +41,10 @@ int64_t sys_mmap(uintptr_t addr, size_t length, int prot, int flags, int fd, int
             if (phys_fb == 0) {
                 phys_fb = (uintptr_t)g_boot_info.fb.fb_addr - g_boot_info.hhdm_offset;
             }
-            dprintf("[KERNEL sys_mmap fb0] fb_addr=%p -> phys_fb=%p\n", g_boot_info.fb.fb_addr, phys_fb);
             uintptr_t start = ALIGN_DOWN(addr, PAGE_SIZE);
 
             for (uintptr_t i = 0; i < aligned_fb_len; i += PAGE_SIZE) {
-                uint32_t mmu_flags = MMU_FLAGS_USER | MMU_FLAGS_WRITE | MMU_FLAGS_READ;
+                uint32_t mmu_flags = MMU_FLAGS_USER | MMU_FLAGS_WRITE | MMU_FLAGS_READ | MMU_FLAGS_SHARED;
                 if (!mmu_map_4k(curproc->p_vm_map, start + i, phys_fb + i, mmu_flags)) {
                     return -ENOMEM;
                 }
@@ -55,10 +53,26 @@ int64_t sys_mmap(uintptr_t addr, size_t length, int prot, int flags, int fd, int
         }
     }
 
+    bool map_fixed = (flags & 0x10); // MAP_FIXED
     size_t aligned_len = ALIGN_UP(length, PAGE_SIZE);
     bool need_search = (addr == 0);
 
-    if (addr != 0) {
+    if (map_fixed) {
+        if (addr == 0 || (addr % PAGE_SIZE) != 0) {
+            return -EINVAL;
+        }
+        need_search = false;
+
+        // Forcefully unmap existing mappings in the requested range for MAP_FIXED
+        uintptr_t start_unmap = ALIGN_DOWN(addr, PAGE_SIZE);
+        uintptr_t end_unmap = ALIGN_UP(addr + length, PAGE_SIZE);
+        for (uintptr_t i = start_unmap; i < end_unmap; i += PAGE_SIZE) {
+            uintptr_t paddr = mmu_translate(curproc->p_vm_map, i);
+            if (paddr != 0) {
+                mmu_unmap(curproc->p_vm_map, i);
+            }
+        }
+    } else if (addr != 0) {
         uintptr_t start = ALIGN_DOWN(addr, PAGE_SIZE);
         uintptr_t end = ALIGN_UP(addr + length, PAGE_SIZE);
         
@@ -96,13 +110,32 @@ int64_t sys_mmap(uintptr_t addr, size_t length, int prot, int flags, int fd, int
         if (found_addr != 0) {
             addr = found_addr;
         } else {
-            addr = curproc->p_mmap_base;
-            curproc->p_mmap_base += aligned_len;
+            uintptr_t fallback_start = curproc->p_mmap_base;
+            while (1) {
+                bool range_free = true;
+                for (uintptr_t offset_val = 0; offset_val < aligned_len; offset_val += PAGE_SIZE) {
+                    if (mmu_translate(curproc->p_vm_map, fallback_start + offset_val) != 0) {
+                        range_free = false;
+                        fallback_start = ALIGN_UP(fallback_start + offset_val + PAGE_SIZE, PAGE_SIZE);
+                        break;
+                    }
+                }
+                if (range_free) {
+                    break;
+                }
+            }
+            addr = fallback_start;
+            curproc->p_mmap_base = fallback_start + aligned_len;
         }
     }
 
     uintptr_t start = ALIGN_DOWN(addr, PAGE_SIZE);
     uintptr_t end = ALIGN_UP(addr + length, PAGE_SIZE);
+
+    struct file *f = NULL;
+    if (fd >= 0 && fd < MAX_FILES) {
+        f = curproc->p_fd_table[fd];
+    }
 
     for (uintptr_t i = start; i < end; i += PAGE_SIZE) {
         page_t *pg = page_alloc(0);
@@ -111,8 +144,28 @@ int64_t sys_mmap(uintptr_t addr, size_t length, int prot, int flags, int fd, int
         uintptr_t paddr = page_to_phys(pg);
         memset(p2v(paddr), 0, PAGE_SIZE);
 
+        if (f && f->f_vn && f->f_vn->ops->read) {
+            int64_t file_offset = offset + (i - start);
+            size_t to_read = 0;
+            if (length > (i - start)) {
+                to_read = length - (i - start);
+                if (to_read > PAGE_SIZE) {
+                    to_read = PAGE_SIZE;
+                }
+            }
+            if (to_read > 0) {
+                int n = f->f_vn->ops->read(f->f_vn, p2v(paddr), to_read, file_offset);
+                if (n < 0) {
+                    dprintf("[KERNEL sys_mmap] File read error %d at offset %ld\n", n, file_offset);
+                    page_free(pg, 0);
+                    return -EIO;
+                }
+            }
+        }
+
         uint32_t mmu_flags = MMU_FLAGS_USER;
         if (prot & 0x2) mmu_flags |= MMU_FLAGS_WRITE; // PROT_WRITE
+        if (flags & 0x1) mmu_flags |= MMU_FLAGS_SHARED; // MAP_SHARED
 
         if (!mmu_map_4k(curproc->p_vm_map, i, paddr, mmu_flags)) {
             page_free(pg, 0);

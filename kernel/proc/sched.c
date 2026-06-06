@@ -5,6 +5,7 @@
 #include <kernel/init.h>
 #include <kernel/intc.h>
 #include <kernel/kmem.h>
+#include <boot/bootinfo.h>
 #include <string.h>
 
 extern void arch_context_switch(struct thread *prev, struct thread *next);
@@ -23,7 +24,7 @@ static struct {
 void sched_enqueue(struct thread *t) {
     if (!t || t->t_tid == 0) return;
 
-    spin_lock(&ready_queue.lock);
+    cpu_status_t flags = spin_lock_irqsave(&ready_queue.lock);
     t->t_state = THREAD_READY;
     t->t_sched_next = NULL;
 
@@ -33,18 +34,29 @@ void sched_enqueue(struct thread *t) {
         ready_queue.head = t;
     }
     ready_queue.tail = t;
-    spin_unlock(&ready_queue.lock);
+    spin_unlock_irqrestore(&ready_queue.lock, flags);
+
+    struct cpu *this_cpu = curcpu;
+    for (uint32_t i = 0; i < g_boot_info.smp.total_cores; i++) {
+        if (i != this_cpu->id) {
+            struct cpu *target_cpu = &cpus[i];
+            if (target_cpu->current_thread && target_cpu->current_thread->t_tid == 0) {
+                arch_trigger_resched(i);
+                break;
+            }
+        }
+    }
 }
 
 struct thread* sched_dequeue(void) {
-    spin_lock(&ready_queue.lock);
+    cpu_status_t flags = spin_lock_irqsave(&ready_queue.lock);
     struct thread *t = ready_queue.head;
     if (t) {
         ready_queue.head = t->t_sched_next;
         if (!ready_queue.head) ready_queue.tail = NULL;
         t->t_sched_next = NULL;
     }
-    spin_unlock(&ready_queue.lock);
+    spin_unlock_irqrestore(&ready_queue.lock, flags);
     return t;
 }
 
@@ -80,14 +92,26 @@ __attribute__((unused)) static void dump_ready_queue(void) {
     dprintf("\n");
 }
 
+void thread_post_switch_hook(void) {
+    struct thread *last = curcpu->prev_thread;
+    if (last) {
+        if (last->t_lock_to_release) {
+            spin_unlock(last->t_lock_to_release);
+            last->t_lock_to_release = NULL;
+        }
+
+        if (last->t_state == THREAD_RUNNING && last->t_tid != 0) {
+            sched_enqueue(last);
+        }
+        
+        curcpu->prev_thread = NULL;
+    }
+}
+
 void mi_switch(void) {
     cpu_status_t flags = arch_irq_save();
 
     struct thread *prev = curthread;
-
-    if (prev->t_state == THREAD_RUNNING && prev->t_tid != 0) {
-        sched_enqueue(prev);
-    }
 
     // spin_lock(&ready_queue.lock);
     // dump_ready_queue(); 
@@ -123,16 +147,15 @@ void mi_switch(void) {
         arch_switch_mm(prev->t_proc, next->t_proc);
     }
 
-    if (prev->t_lock_to_release) {
-        spin_unlock(prev->t_lock_to_release);
-        prev->t_lock_to_release = NULL;
-    }
-
     // dprintf("[SWITCH] Switching from TID %d (%s) to TID %d (%s), prev_fs: %p, next_fs: %p\n", 
     //         prev->t_tid, get_state_name(prev->t_state), next->t_tid, get_state_name(next->t_state),
     //         (void*)prev->t_fs_base, (void*)next->t_fs_base);
 
+    curcpu->prev_thread = prev;
+
     arch_context_switch(prev, next);
+
+    thread_post_switch_hook();
 
     arch_irq_restore(flags);
 }
@@ -165,11 +188,12 @@ void thread_sleep(uint64_t ms) {
         curthread->t_sched_next = curr->t_sched_next;
         curr->t_sched_next = curthread;
     }
-    spin_unlock(&sleep_queue.lock);
-    
-    arch_irq_restore(flags);
 
+    curthread->t_lock_to_release = &sleep_queue.lock;
+    
     mi_switch();
+
+    arch_irq_restore(flags);
 }
 
 void sched_tick(void) {
@@ -239,8 +263,7 @@ void scheduler_init(void) {
 
     arch_irq_save();
 
-    g_intc->register_handler(0x40, arch_timer_handler, NULL);
-    g_intc->start_timer(1, 0x40);
+    arch_sched_init();
 
     arch_init_first_thread();
     // noreturn

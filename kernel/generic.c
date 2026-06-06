@@ -95,10 +95,19 @@ void generic_entry() {
     arch_start_thread(curcpu->idle);
 }
 
+void ap_main(void) {
+    arch_irq_enable();
+
+    while(1) {
+        arch_irq_enable();
+        arch_halt();
+    }
+}
+
 void ap_entry(CoreInfo* info) {
     arch_irq_disable();
 
-    ap_early_init(info->hw_id);
+    ap_early_init(info->logic_id, info->hw_id);
     
     while (!ap_release) {
         arch_pause();
@@ -107,5 +116,8 @@ void ap_entry(CoreInfo* info) {
     __sync_synchronize();
     do_ap_initcalls();
 
-    for (;;) arch_halt();
+    struct thread *idle_t = arch_init_ap_thread(info->logic_id);
+
+    extern void arch_start_ap_thread(struct thread *t);
+    arch_start_ap_thread(idle_t);
 }
