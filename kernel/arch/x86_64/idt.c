@@ -96,6 +96,7 @@ void panic(const char* description, struct trapframe *regs) {
     uintptr_t fault_addr = read_cr2();
 
     dprintf("\n[KERNEL PANIC] %s (Vector: %d)\n", description, regs->int_no);
+    dprintf("CPU #%d\n", curcpu->id);
     dprintf("GS_BASE: %016llx  KERNEL_GS_BASE: %016llx\n", rdmsr(MSR_GS_BASE), rdmsr(MSR_KERNEL_GS_BASE));
     dprintf("Error Code: %08x\n", regs->err_code);
     dprintf("RIP: %016llx  RSP: %016llx\n", regs->rip, regs->rsp);
@@ -155,6 +156,10 @@ static void isr_handler_inner(struct trapframe *regs) {
                     sig = SIGBUS;
                 }
                 
+                dprintf("[USER EXCEPTION] PID: %d, Thread: %d, Exception: %s (Vector: %d), RIP: 0x%llx, Error Code: 0x%llx\n",
+                        curproc ? curproc->p_pid : -1, curthread ? curthread->t_tid : -1,
+                        exceptions[vector], vector, regs->rip, regs->err_code);
+
                 if (curproc && curthread) {
                     uint64_t lock_flags = spin_lock_irqsave(&curproc->p_lock);
                     curthread->t_sig_pending |= (1ULL << (sig - 1));

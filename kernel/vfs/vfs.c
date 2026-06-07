@@ -52,6 +52,16 @@ void vfs_init(void) {
         dev_vn->ops->create(dev_vn, "tty", S_IFCHR | 0666, &tty_vn);
         dev_vn->ops->create(dev_vn, "fb0", S_IFCHR | 0666, &fb0_vn);
         dev_vn->ops->create(dev_vn, "kbd", S_IFCHR | 0666, &kbd_vn);
+
+        dev_vn->ops->mkdir(dev_vn, "dri", 0755);
+        struct vnode *dri_vn = NULL;
+        if (dev_vn->ops->lookup(dev_vn, "dri", &dri_vn) == 0) {
+            struct vnode *card0_vn = NULL;
+            dri_vn->ops->create(dri_vn, "card0", S_IFCHR | 0666, &card0_vn);
+            vput(dri_vn);
+            if (card0_vn) vput(card0_vn);
+        }
+
         vput(dev_vn);
         if (null_vn) vput(null_vn);
         if (tty_vn) vput(tty_vn);
@@ -64,18 +74,90 @@ void vfs_init(void) {
     }
 }
 
-static void sanitize_path(const char *src, char *dst, size_t dst_size) {
-    size_t len = strlen(src);
-    if (len >= dst_size) {
-        len = dst_size - 1;
+void sanitize_path(const char *src, char *dst, size_t dst_size) {
+    if (!src || dst_size == 0) return;
+
+    bool is_absolute = (src[0] == '/');
+
+    const char *stack[64];
+    int stack_size = 0;
+
+    char *buf = kmalloc(4096);
+    if (!buf) {
+        strncpy(dst, src, dst_size - 1);
+        dst[dst_size - 1] = '\0';
+        return;
     }
-    memcpy(dst, src, len);
-    dst[len] = '\0';
-    
-    while (len > 1 && dst[len - 1] == '/') {
-        dst[len - 1] = '\0';
-        len--;
+    strncpy(buf, src, 4095);
+    buf[4095] = '\0';
+
+    char *token = buf;
+    char *next_token;
+    while (token && *token) {
+        char *slash = NULL;
+        for (char *p = token; *p; p++) {
+            if (*p == '/') {
+                slash = p;
+                break;
+            }
+        }
+        if (slash) {
+            *slash = '\0';
+            next_token = slash + 1;
+        } else {
+            next_token = NULL;
+        }
+
+        if (strcmp(token, "") == 0 || strcmp(token, ".") == 0) {
+            // Skip
+        } else if (strcmp(token, "..") == 0) {
+            if (stack_size > 0 && strcmp(stack[stack_size - 1], "..") != 0) {
+                stack_size--;
+            } else if (!is_absolute) {
+                if (stack_size < 64) {
+                    stack[stack_size++] = "..";
+                }
+            }
+        } else {
+            if (stack_size < 64) {
+                stack[stack_size++] = token;
+            }
+        }
+
+        token = next_token;
     }
+
+    char *d = dst;
+    char *d_end = dst + dst_size - 1;
+
+    if (is_absolute) {
+        if (d < d_end) *d++ = '/';
+    }
+
+    for (int i = 0; i < stack_size; i++) {
+        if (i > 0) {
+            if (d < d_end) *d++ = '/';
+        }
+        size_t len = strlen(stack[i]);
+        if (d + len < d_end) {
+            memcpy(d, stack[i], len);
+            d += len;
+        } else {
+            break;
+        }
+    }
+
+    if (d == dst) {
+        if (is_absolute) {
+            if (d < d_end) *d++ = '/';
+        } else {
+            if (d < d_end) *d++ = '.';
+        }
+    }
+
+    *d = '\0';
+
+    kfree(buf);
 }
 
 static const char* vfs_next_component(const char *path, char *out_name) {
@@ -91,7 +173,10 @@ static const char* vfs_next_component(const char *path, char *out_name) {
     return path;
 }
 
-int vfs_lookup(const char *path, struct vnode *base, struct vnode **res) {
+static int resolve_symlink(struct vnode *link_vn, int depth, struct vnode **res);
+
+int vfs_lookup_impl(const char *path, struct vnode *base, int follow_last, int depth, struct vnode **res) {
+    if (depth > 8) return -ELOOP;
     if (!path || *path == '\0') return -ENOENT;
 
     struct vnode *curr = (path[0] == '/') ? g_root_vnode : base;
@@ -103,13 +188,23 @@ int vfs_lookup(const char *path, struct vnode *base, struct vnode **res) {
     const char *next = path;
 
     while ((next = vfs_next_component(next, name))) {
-        struct vnode *found = NULL;
+        if (curr->type == S_IFLNK) {
+            struct vnode *target_vn = NULL;
+            int err = resolve_symlink(curr, depth, &target_vn);
+            if (err < 0) {
+                vput(curr);
+                return err;
+            }
+            vput(curr);
+            curr = target_vn;
+        }
 
         if (curr->type != S_IFDIR) {
             vput(curr);
             return -ENOTDIR;
         }
 
+        struct vnode *found = NULL;
         int err = vfs_cached_lookup(curr, name, &found);
         
         if (err != 0) {
@@ -125,8 +220,100 @@ int vfs_lookup(const char *path, struct vnode *base, struct vnode **res) {
         curr = found;
     }
 
+    if (curr->type == S_IFLNK && follow_last) {
+        struct vnode *target_vn = NULL;
+        int err = resolve_symlink(curr, depth, &target_vn);
+        if (err < 0) {
+            vput(curr);
+            return err;
+        }
+        vput(curr);
+        curr = target_vn;
+    }
+
     *res = curr;
     return 0;
+}
+
+static int resolve_symlink(struct vnode *link_vn, int depth, struct vnode **res) {
+    char *target_buf = kmalloc(512);
+    if (!target_buf) return -ENOMEM;
+
+    if (!link_vn->ops->read) {
+        kfree(target_buf);
+        return -EINVAL;
+    }
+
+    ssize_t n = link_vn->ops->read(link_vn, target_buf, 511, 0);
+    if (n < 0) {
+        kfree(target_buf);
+        return n;
+    }
+    target_buf[n] = '\0';
+
+    struct vnode *base = (target_buf[0] == '/') ? g_root_vnode : link_vn->v_parent;
+    if (!base) {
+        base = (curproc && curproc->p_cwd) ? curproc->p_cwd : g_root_vnode;
+    }
+
+    int err = vfs_lookup_impl(target_buf, base, 1, depth + 1, res);
+    kfree(target_buf);
+    return err;
+}
+
+int vfs_lookup(const char *path, struct vnode *base, struct vnode **res) {
+    return vfs_lookup_impl(path, base, 1, 0, res);
+}
+
+int vfs_symlink(const char *target, const char *linkpath) {
+    if (!curthread || !curthread->t_proc) return -ESRCH;
+    struct proc *p = curthread->t_proc;
+
+    char clean_linkpath[256];
+    sanitize_path(linkpath, clean_linkpath, sizeof(clean_linkpath));
+
+    char parent_path[256];
+    char child_name[256];
+    
+    const char *last_slash = strrchr(clean_linkpath, '/');
+    if (!last_slash) {
+        strcpy(parent_path, ".");
+        strcpy(child_name, clean_linkpath);
+    } else if (last_slash == clean_linkpath) {
+        strcpy(parent_path, "/");
+        strcpy(child_name, clean_linkpath + 1);
+    } else {
+        size_t len = last_slash - clean_linkpath;
+        strncpy(parent_path, clean_linkpath, len);
+        parent_path[len] = '\0';
+        strcpy(child_name, last_slash + 1);
+    }
+
+    struct vnode *dvp = NULL;
+    int err = vfs_lookup(parent_path, p->p_cwd, &dvp);
+    if (err != 0) return err;
+
+    struct vnode *vp = NULL;
+    if (dvp->ops->create) {
+        err = dvp->ops->create(dvp, child_name, S_IFLNK | 0777, &vp);
+        if (err == 0) {
+            vfs_hash_insert(dvp, child_name, vp);
+            if (vp->ops->write) {
+                ssize_t n = vp->ops->write(vp, target, strlen(target), 0);
+                if (n < 0) {
+                    err = (int)n;
+                }
+            } else {
+                err = -ENOTSUP;
+            }
+            vput(vp);
+        }
+    } else {
+        err = -ENOTSUP;
+    }
+
+    vput(dvp);
+    return err;
 }
 
 int vfs_open(const char *path, int flags, mode_t mode, int *fd_out) {
@@ -140,7 +327,7 @@ int vfs_open(const char *path, int flags, mode_t mode, int *fd_out) {
     int err = vfs_lookup(clean_path, p->p_cwd, &vp);
 
     if (err == -ENOENT && (flags & O_CREAT)) {
-        char parent_path[PATH_MAX];
+        char parent_path[256];
         char child_name[NAME_MAX];
         
         const char *last_slash = strrchr(clean_path, '/');

@@ -9,6 +9,8 @@
 #define O_EXCL      0x0080    /* 파일이 있으면 에러 */
 #define O_TRUNC     0x0200    /* 기존 내용 삭제 */
 #define O_APPEND    0x0400    /* 이어 쓰기 */
+#define O_NONBLOCK  0x0800    /* 논블로킹 I/O */
+#define O_CLOEXEC   0x80000   /* 실행 시 닫기 */
 #define O_DIRECTORY 0x010000  /* 디렉토리가 아니면 에러 */
 
 #define SEEK_SET    0         /* 커서를 offset 위치로 설정 */

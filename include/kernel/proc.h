@@ -11,7 +11,7 @@
 #include <uapi/types.h>
 #include <uapi/signal.h>
 
-#define MAX_FILES 32
+#define MAX_FILES 256
 
 
 #define THREAD_FLAG_USER   (1 << 0)

@@ -111,6 +111,7 @@ iso: all
 	@mkdir -p $(INITRD_TEMP)/lib
 	@cp -v $(MUSL_OUT_DIR)/lib/libc.so $(INITRD_TEMP)/lib/libc.so
 	@cp -v $(MUSL_OUT_DIR)/lib/libc.so $(INITRD_TEMP)/lib/ld-musl-x86_64.so.1
+	@cp -L -v $(MUSL_OUT_DIR)/lib/*.so* $(INITRD_TEMP)/lib/
 
 	@cd $(INITRD_TEMP) && find . -mindepth 1 | cpio -o -H newc > $(INITRD_IMG)
 
@@ -139,7 +140,8 @@ run: iso
 		-m 8G \
 		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
 		-bios /usr/share/ovmf/OVMF.fd \
-		-serial stdio -d int,cpu_reset -smp 4 -accel kvm -cpu host
+		-serial stdio -d int,cpu_reset -smp 1 -accel kvm -cpu host \
+		-vga std
 
 clean:
 	rm -rf $(BUILD_DIR) $(BIN_DIR)

@@ -1007,6 +1007,9 @@ void handle_page_fault(struct trapframe *regs, void *data) {
 
     // OH SEGFAULT
     if ((regs->cs & 3) == 3) {
+        dprintf("[USER PAGE FAULT] PID: %d, Thread: %d, Faulting Addr (CR2): 0x%lx, RIP: 0x%llx, ErrCode: 0x%llx\n",
+                curproc ? curproc->p_pid : -1, curthread ? curthread->t_tid : -1,
+                read_cr2(), regs->rip, regs->err_code);
         if (curproc && curthread) {
             uint64_t lock_flags = spin_lock_irqsave(&curproc->p_lock);
             curthread->t_sig_pending |= (1ULL << (SIGSEGV - 1));
@@ -1015,6 +1018,7 @@ void handle_page_fault(struct trapframe *regs, void *data) {
             return;
         }
     }
+
 
     panic("Segmentation Fault", regs);
 }
@@ -1036,6 +1040,42 @@ void mmu_tlb_shootdown(void) {
             }
         }
     }
+}
+
+bool mmu_is_mapped(page_table_t* map, uintptr_t virt) {
+    if (!map) return false;
+    uint64_t lock_flags = spin_lock_irqsave(&g_mmu_lock);
+    pt_entry_t *pte = vmm_get_pte(map, (uint64_t)virt, false);
+    bool ret = false;
+    if (pte && (*pte & (X86_PTE_PRESENT | X86_PTE_DEMAND))) {
+        ret = true;
+    }
+    spin_unlock_irqrestore(&g_mmu_lock, lock_flags);
+    return ret;
+}
+
+uint64_t mmu_get_flags(page_table_t* map, uintptr_t virt) {
+    if (!map) return 0;
+    uint64_t lock_flags = spin_lock_irqsave(&g_mmu_lock);
+    pt_entry_t *pte = vmm_get_pte(map, (uint64_t)virt, false);
+    uint64_t flags = 0;
+    if (pte && ((*pte & X86_PTE_PRESENT) || (*pte & X86_PTE_DEMAND))) {
+        flags |= MMU_FLAGS_READ;
+        if (*pte & X86_PTE_WRITABLE) {
+            flags |= MMU_FLAGS_WRITE;
+        }
+        if (!(*pte & X86_PTE_NX)) {
+            flags |= MMU_FLAGS_EXEC;
+        }
+        if (*pte & X86_PTE_SHARED) {
+            flags |= MMU_FLAGS_SHARED;
+        }
+        if (*pte & X86_PTE_USER) {
+            flags |= MMU_FLAGS_USER;
+        }
+    }
+    spin_unlock_irqrestore(&g_mmu_lock, lock_flags);
+    return flags;
 }
 
 mem_initcall(pmm_init, PRIO_FIRST);

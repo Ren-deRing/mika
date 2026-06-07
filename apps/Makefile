@@ -3,10 +3,10 @@ APP_DIRS      := $(patsubst %/Makefile, %, $(APP_MAKEFILES))
 
 export ARCH         ?= x86_64
 export BASE_DIR     ?= $(shell pwd)/..
-export MUSL_OUT_DIR ?= $(BASE_DIR)/build/musl
+export MUSL_OUT_DIR ?= $(BASE_DIR)/musl/build_out
 export USER_BIN_DIR ?= $(BASE_DIR)/build/rootfs/bin
 
-export APPS_CC      := clang -target $(ARCH)-unknown-none-elf
+export APPS_CC      := clang -target $(ARCH)-pc-linux-musl
 export APPS_CFLAGS  := -g -O2 -fno-strict-aliasing -ffreestanding -fno-stack-protector \
                        -fPIE -fno-omit-frame-pointer \
                        -m64 -march=x86-64 -mno-red-zone \

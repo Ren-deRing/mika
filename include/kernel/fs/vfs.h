@@ -8,6 +8,9 @@ void vfs_init(void);
 void vfs_load_initrd(uintptr_t addr, uint64_t size);
 
 int vfs_lookup(const char *path, struct vnode *base, struct vnode **vpp);
+int vfs_lookup_impl(const char *path, struct vnode *base, int follow_last, int depth, struct vnode **vpp);
+int vfs_symlink(const char *target, const char *linkpath);
+void sanitize_path(const char *src, char *dst, size_t dst_size);
 int vfs_open(const char *path, int flags, mode_t mode, int *fd);
 int vfs_close(int fd);
 int vfs_read(int fd, void *buf, size_t n);

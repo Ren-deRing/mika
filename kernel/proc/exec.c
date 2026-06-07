@@ -43,7 +43,7 @@ int proc_exec(void *elf_data, char *const argv[], char *const envp[]) {
         return -ENOEXEC;
     }
 
-    struct proc *p = proc_create(next_pid++);
+    struct proc *p = proc_create(__sync_fetch_and_add(&next_pid, 1));
     if (!p) {
         mmu_destroy_map(new_map);
         return -ENOMEM;
@@ -65,7 +65,7 @@ int proc_exec(void *elf_data, char *const argv[], char *const envp[]) {
     p->p_stack_top = final_rsp;
     p->p_brk = ALIGN_UP(brk, PAGE_SIZE);
 
-    struct thread *new_t = thread_create(p, next_tid++, arch_user_trampoline, (void *)p);
+    struct thread *new_t = thread_create(p, __sync_fetch_and_add(&next_tid, 1), arch_user_trampoline, (void *)p);
     if (!new_t) {
         return -ENOMEM;
     }
@@ -87,6 +87,11 @@ int proc_exec(void *elf_data, char *const argv[], char *const envp[]) {
 #define AT_PAGESZ  6
 #define AT_BASE    7
 #define AT_ENTRY   9
+#define AT_UID     11
+#define AT_EUID    12
+#define AT_GID     13
+#define AT_EGID    14
+#define AT_SECURE  23
 #define AT_RANDOM 25
 
 uintptr_t setup_user_stack(page_table_t *new_map, uintptr_t user_stack_top, 
@@ -103,7 +108,7 @@ uintptr_t setup_user_stack(page_table_t *new_map, uintptr_t user_stack_top,
     for (int i = 0; i < argc; i++) { strings_size += strlen(argv[i]) + 1; }
     for (int i = 0; i < envc; i++) { strings_size += strlen(envp[i]) + 1; }
 
-    size_t table_elements = 1 + argc + 1 + envc + 1 + 16;
+    size_t table_elements = 1 + argc + 1 + envc + 1 + 32;
     size_t table_bytes = table_elements * sizeof(uintptr_t);
 
     size_t total_pure_size = table_bytes + strings_size;
@@ -162,6 +167,21 @@ uintptr_t setup_user_stack(page_table_t *new_map, uintptr_t user_stack_top,
         k_table[table_idx++] = AT_ENTRY;
         k_table[table_idx++] = original_entry;
     }
+    
+    k_table[table_idx++] = AT_UID;
+    k_table[table_idx++] = 0;
+
+    k_table[table_idx++] = AT_EUID;
+    k_table[table_idx++] = 0;
+
+    k_table[table_idx++] = AT_GID;
+    k_table[table_idx++] = 0;
+
+    k_table[table_idx++] = AT_EGID;
+    k_table[table_idx++] = 0;
+
+    k_table[table_idx++] = AT_SECURE;
+    k_table[table_idx++] = 0;
     
     k_table[table_idx++] = AT_NULL;
     k_table[table_idx++] = 0;

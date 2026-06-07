@@ -55,6 +55,8 @@ bool mmu_map_demand(page_table_t* map, uintptr_t virt, uint64_t flags);
 void mmu_unmap(page_table_t* map, uintptr_t virt);
 void mmu_protect_page(page_table_t* map, uintptr_t vaddr, int prot);
 uintptr_t mmu_translate(page_table_t* map, uintptr_t virt);
+bool mmu_is_mapped(page_table_t* map, uintptr_t virt);
+uint64_t mmu_get_flags(page_table_t* map, uintptr_t virt);
 page_table_t *mmu_clone_map(page_table_t *parent_map);
 
 uint64_t page_to_phys(page_t* page);

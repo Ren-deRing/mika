@@ -20,6 +20,11 @@ struct vnode* ramfs_create_vnode(uint32_t type) {
     }
     memset(node, 0, sizeof(struct ramfs_node));
     
+    node->mode = (type == S_IFDIR) ? 0755 : 0644;
+    node->uid = 0;
+    node->gid = 0;
+    node->nlink = (type == S_IFDIR) ? 2 : 1;
+
     vn->data = node;
     return vn;
 }
@@ -48,8 +53,6 @@ int ramfs_lookup(struct vnode *dvp, const char *name, struct vnode **vpp) {
 }
 
 int ramfs_mkdir(struct vnode *dvp, const char *name, mode_t mode) {
-    (void)mode; // TODO
-
     struct ramfs_node *dnode = (struct ramfs_node *)dvp->data;
 
     // ENAMETOOLONG Check
@@ -64,6 +67,12 @@ int ramfs_mkdir(struct vnode *dvp, const char *name, mode_t mode) {
 
     struct vnode *nvp = ramfs_create_vnode(S_IFDIR);
     if (!nvp) return -ENOMEM;
+
+    struct ramfs_node *node = (struct ramfs_node *)nvp->data;
+    node->mode = mode & 07777;
+    node->uid = 0;
+    node->gid = 0;
+    node->nlink = 2;
 
     struct ramfs_entry *entry = kmalloc(sizeof(struct ramfs_entry));
     if (!entry) {
@@ -81,8 +90,6 @@ int ramfs_mkdir(struct vnode *dvp, const char *name, mode_t mode) {
 }
 
 int ramfs_create(struct vnode *dvp, const char *name, mode_t mode, struct vnode **vpp) {
-    (void)mode;
-
     struct ramfs_node *dnode = (struct ramfs_node *)dvp->data;
 
     // ENAMETOOLONG Check
@@ -96,8 +103,15 @@ int ramfs_create(struct vnode *dvp, const char *name, mode_t mode, struct vnode 
     }
 
     // vnode 생성
-    struct vnode *nvp = ramfs_create_vnode(S_IFREG);
+    uint32_t type = S_ISLNK(mode) ? S_IFLNK : S_IFREG;
+    struct vnode *nvp = ramfs_create_vnode(type);
     if (!nvp) return -ENOMEM;
+
+    struct ramfs_node *node = (struct ramfs_node *)nvp->data;
+    node->mode = mode & 07777;
+    node->uid = 0;
+    node->gid = 0;
+    node->nlink = 1;
 
     struct ramfs_entry *entry = kmalloc(sizeof(struct ramfs_entry));
     if (!entry) {
@@ -145,7 +159,7 @@ int ramfs_inactive(struct vnode *vp) {
 
 ssize_t ramfs_write(struct vnode *vp, const void *buf, size_t count, off_t off) {
     struct ramfs_node *node = (struct ramfs_node *)vp->data;
-    if (vp->type != S_IFREG) return -EISDIR;
+    if (vp->type != S_IFREG && vp->type != S_IFLNK) return -EISDIR;
 
     if (node->is_static_buf) {
         size_t old_size = node->size;
@@ -227,7 +241,7 @@ ssize_t ramfs_write(struct vnode *vp, const void *buf, size_t count, off_t off) 
 
 ssize_t ramfs_read(struct vnode *vp, void *buf, size_t count, off_t off) {
     struct ramfs_node *node = (struct ramfs_node *)vp->data;
-    if (vp->type != S_IFREG) return -EISDIR;
+    if (vp->type != S_IFREG && vp->type != S_IFLNK) return -EISDIR;
 
     if (off >= (off_t)node->size) return 0; // EOF
     if (off + count > node->size) {
@@ -320,8 +334,15 @@ int ramfs_getattr(struct vnode *vp, struct stat *st) {
     memset(st, 0, sizeof(struct stat));
     
     st->st_size = node->size;
-    st->st_mode = vp->type;
-    // TODO
+    st->st_mode = vp->type | (node->mode & 07777);
+    st->st_uid = node->uid;
+    st->st_gid = node->gid;
+    st->st_nlink = node->nlink;
+    st->st_atim = node->atime;
+    st->st_mtim = node->mtime;
+    st->st_ctim = node->ctime;
+    st->st_blksize = 4096;
+    st->st_blocks = (node->size + 511) / 512;
     
     return 0;
 }

@@ -11,4 +11,6 @@
 /apps/**/*
 !/apps/**/*/
 !/apps/**/*.*
+!/apps/**/Makefile
 /apps/**/*.o
+/apps/**/*.so

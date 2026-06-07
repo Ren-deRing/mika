@@ -174,16 +174,16 @@ __attribute__((unused)) static void dump_mlfq_queues(void) {
 void thread_post_switch_hook(void) {
     struct thread *last = curcpu->prev_thread;
     if (last) {
-        if (last->t_lock_to_release) {
-            spin_unlock(last->t_lock_to_release);
-            last->t_lock_to_release = NULL;
-        }
-
         if (last->t_state == THREAD_RUNNING && last->t_tid != 0) {
             sched_enqueue(last);
         }
         
         curcpu->prev_thread = NULL;
+
+        if (last->t_lock_to_release) {
+            spin_unlock(last->t_lock_to_release);
+            last->t_lock_to_release = NULL;
+        }
     }
 }
 

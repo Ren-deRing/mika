@@ -7,6 +7,7 @@
 #include <kernel/proc.h>
 #include <kernel/cpu.h>
 #include <kernel/printf.h>
+#include <kernel/kmem.h>
 
 #include <uapi/fcntl.h>
 
@@ -40,6 +41,30 @@ static uint32_t hex8_to_u32(const char *s) {
     return val;
 }
 
+static void mkdir_p(const char *path, mode_t mode) {
+    char *temp = kmalloc(4096);
+    if (!temp) return;
+    strncpy(temp, path, 4095);
+    temp[4095] = '\0';
+    size_t len = strlen(temp);
+    if (len == 0) {
+        kfree(temp);
+        return;
+    }
+    if (temp[len - 1] == '/') {
+        temp[len - 1] = '\0';
+    }
+    for (char *p = temp + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            vfs_mkdir(temp, mode);
+            *p = '/';
+        }
+    }
+    vfs_mkdir(temp, mode);
+    kfree(temp);
+}
+
 void vfs_load_initrd(uintptr_t addr, uint64_t size) {
     if (!addr || !size) return;
 
@@ -61,18 +86,37 @@ void vfs_load_initrd(uintptr_t addr, uint64_t size) {
         uint32_t data_off  = (head_size + 3) & ~3;
         uint8_t *data      = ptr + data_off;
 
-        char path[PATH_MAX];
+        char *path = kmalloc(4096);
+        if (!path) {
+            dprintf("[INITRD] Out of memory allocating path\n");
+            break;
+        }
+
         if (name[0] == '.') {
-            snprintf(path, sizeof(path), "%s", name + 1);
+            snprintf(path, 4096, "%s", name + 1);
         } else {
-            snprintf(path, sizeof(path), "/%s", name);
+            snprintf(path, 4096, "/%s", name);
         }
 
         if (S_ISDIR(mode)) {
-            vfs_mkdir(path, mode & 0777); 
+            mkdir_p(path, mode & 0777); 
         } else if (S_ISREG(mode)) {
+            char *parent = kmalloc(4096);
+            if (parent) {
+                strncpy(parent, path, 4095);
+                parent[4095] = '\0';
+                char *last_slash = strrchr(parent, '/');
+                if (last_slash && last_slash != parent) {
+                    *last_slash = '\0';
+                    mkdir_p(parent, 0755);
+                }
+                kfree(parent);
+            }
             int fd;
-            if (vfs_open(path, O_CREAT | O_WRONLY, mode & 0777, &fd) == 0) {
+            int r = vfs_open(path, O_CREAT | O_WRONLY, mode & 0777, &fd);
+            if (r != 0) {
+                dprintf("[INITRD] Failed to create file %s, error: %d\n", path, r);
+            } else {
                 struct proc *p = curproc;
                 if (p && fd >= 0 && fd < MAX_FILES && p->p_fd_table[fd]) {
                     struct file *f = p->p_fd_table[fd];
@@ -88,6 +132,7 @@ void vfs_load_initrd(uintptr_t addr, uint64_t size) {
             }
         }
 
+        kfree(path);
         ptr += data_off + ((filesize + 3) & ~3);
     }
 }

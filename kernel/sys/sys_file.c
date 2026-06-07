@@ -7,6 +7,10 @@
 #include <kernel/kmem.h>
 #include <kernel/list.h>
 #include <kernel/syscall.h>
+#include <kernel/lock.h>
+#include <kernel/clock.h>
+#include <kernel/drm.h>
+
 
 #include <kernel/fs/vfs.h>
 #include <kernel/fs/vnode.h>
@@ -75,6 +79,10 @@ struct our_fb_fix_screeninfo {
     uint16_t reserved[2];
 };
 
+
+
+
+
 struct our_termios {
     uint32_t c_iflag;
     uint32_t c_oflag;
@@ -95,30 +103,39 @@ int64_t sys_write(int fd, const void *user_buf, size_t count) {
 
     if (!is_user_address_range(user_buf, count)) return -EFAULT;
 
+    struct file *f = NULL;
     if (fd >= 0 && fd < MAX_FILES) {
-        struct file *f = curproc->p_fd_table[fd];
-        if (f && f->f_vn && strcmp(f->f_vn->v_name, "fb0") == 0) {
-            size_t fb_size = g_boot_info.fb.pitch * g_boot_info.fb.height;
-            if (f->f_pos >= fb_size) return 0;
-            size_t actual_count = count;
-            if (f->f_pos + actual_count > fb_size) {
-                actual_count = fb_size - f->f_pos;
-            }
-            if (actual_count > 0) {
-                if (copy_from_user((char *)g_boot_info.fb.fb_addr + f->f_pos, user_buf, actual_count) < 0) {
-                    return -EFAULT;
-                }
-                f->f_pos += actual_count;
-            }
-            return (int64_t)actual_count;
+        f = curproc->p_fd_table[fd];
+    }
+
+    if (f && f->f_vn && strcmp(f->f_vn->v_name, "fb0") == 0) {
+        size_t fb_size = g_boot_info.fb.pitch * g_boot_info.fb.height;
+        if (f->f_pos >= fb_size) return 0;
+        size_t actual_count = count;
+        if (f->f_pos + actual_count > fb_size) {
+            actual_count = fb_size - f->f_pos;
         }
+        if (actual_count > 0) {
+            if (copy_from_user((char *)g_boot_info.fb.fb_addr + f->f_pos, user_buf, actual_count) < 0) {
+                return -EFAULT;
+            }
+            f->f_pos += actual_count;
+        }
+        return (int64_t)actual_count;
+    }
+
+    if (f && f->f_vn) {
+        if (strcmp(f->f_vn->v_name, "tty") == 0) {
+            return tty_write(user_buf, count);
+        }
+        return (int64_t)vfs_write(fd, user_buf, count);
     }
 
     if (fd == 1 || fd == 2) {
         return tty_write(user_buf, count);
     }
 
-    return (int64_t)vfs_write(fd, user_buf, count);
+    return -EBADF;
 }
 
 int64_t sys_writev(int fd, const void *user_iov, int iovcnt) {
@@ -194,9 +211,15 @@ int64_t sys_open(const char *user_path, int flags, int mode) {
     char kpath[256];
     if (copy_str_from_user(kpath, user_path, 256) < 0) return -EFAULT;
 
+    dprintf("[sys_open] path: %s, flags: 0x%x, mode: 0x%x\n", kpath, flags, mode);
+
     int fd_out = -1;
     int err = vfs_open(kpath, flags, (mode_t)mode, &fd_out);
-    if (err < 0) return (int64_t)err;
+    if (err < 0) {
+        dprintf("[sys_open] Failed to open %s, error: %d\n", kpath, err);
+        return (int64_t)err;
+    }
+    dprintf("[sys_open] Succeeded path: %s, fd: %d\n", kpath, fd_out);
     return (int64_t)fd_out;
 }
 
@@ -220,27 +243,48 @@ int64_t sys_lseek(int fd, int64_t offset, int whence) {
 int64_t sys_read(int fd, void *user_buf, size_t count) {
     if (fd < 0 || fd >= MAX_FILES) return -EBADF;
     if (count == 0) return 0;
-    if (!is_user_address_range(user_buf, count)) return -EFAULT;
+    if (!is_user_address_range(user_buf, count)) {
+        dprintf("[sys_read] Invalid user address range: fd=%d, buf=%p, count=%lu\n", fd, user_buf, count);
+        return -EFAULT;
+    }
 
     struct file *f = curproc->p_fd_table[fd];
     if (f && f->f_vn) {
         if (strcmp(f->f_vn->v_name, "kbd") == 0 || strcmp(f->f_vn->v_name, "tty") == 0) {
             return tty_read(user_buf, count);
         }
+        if (strcmp(f->f_vn->v_name, "card0") == 0) {
+            return drm_read(f, user_buf, count);
+        }
     }
 
     char kbuf[4096];
     size_t total = 0;
 
+    if (f && f->f_vn) {
+        dprintf("[sys_read] fd: %d (%s), buf: %p, count: %lu\n", fd, f->f_vn->v_name, user_buf, count);
+    } else {
+        dprintf("[sys_read] fd: %d (unknown), buf: %p, count: %lu\n", fd, user_buf, count);
+    }
+
+    bool is_gbm = (f && f->f_vn && strcmp(f->f_vn->v_name, "libgbm.so") == 0);
+
     while (total < count) {
         size_t to_copy = count - total;
         if (to_copy > sizeof(kbuf)) to_copy = sizeof(kbuf);
 
-        int64_t cur_pos = f ? f->f_pos : -1;
         int n = vfs_read(fd, kbuf, to_copy);
 
-        if (n < 0) return (total == 0) ? n : (int64_t)total;
+        if (n < 0) {
+            if (is_gbm) dprintf("[sys_read] libgbm.so read error: %d\n", n);
+            return (total == 0) ? n : (int64_t)total;
+        }
         if (n == 0) break;
+
+        if (is_gbm) {
+            dprintf("[sys_read] libgbm.so read %d bytes (requested %ld), first 4 bytes: %02x %02x %02x %02x\n",
+                    n, to_copy, (unsigned char)kbuf[0], (unsigned char)kbuf[1], (unsigned char)kbuf[2], (unsigned char)kbuf[3]);
+        }
 
         if (copy_to_user((char *)user_buf + total, kbuf, n) < 0) {
             return -EFAULT;
@@ -258,19 +302,15 @@ int64_t sys_fstat(int fd, void *user_statbuf) {
     struct stat kst;
     memset(&kst, 0, sizeof(struct stat));
 
-    if (fd == 0 || fd == 1 || fd == 2) {
-        kst.st_mode = S_IFCHR | 0666; 
-        kst.st_blksize = 1024;
-        kst.st_blocks = 0;
-        kst.st_size = 0;
-    } else {
-        struct file *f = curproc->p_fd_table[fd];
-        if (!f || !f->f_vn) return -EBADF;
-
+    struct file *f = curproc->p_fd_table[fd];
+    if (f && f->f_vn) {
         struct vnode *vp = f->f_vn;
         if (vp->ops && vp->ops->getattr) {
             int r = vp->ops->getattr(vp, &kst);
-            if (r < 0) return r;
+            if (r < 0) {
+                dprintf("[sys_fstat] getattr failed for fd %d: %d\n", fd, r);
+                return r;
+            }
         } else {
             kst.st_mode = vp->type;
             kst.st_size = 0;
@@ -283,6 +323,21 @@ int64_t sys_fstat(int fd, void *user_statbuf) {
             }
         }
         kst.st_blksize = 4096;
+        kst.st_dev = 1;
+        kst.st_ino = (ino_t)vp;
+        kst.st_blocks = (kst.st_size + 511) / 512;
+        dprintf("[sys_fstat] fd: %d (%s), mode: 0x%x, size: %ld, blksize: %ld, dev: %ld, ino: %ld\n", fd, vp->v_name, kst.st_mode, kst.st_size, kst.st_blksize, kst.st_dev, kst.st_ino);
+    } else if (fd == 0 || fd == 1 || fd == 2) {
+        kst.st_mode = S_IFCHR | 0666; 
+        kst.st_blksize = 1024;
+        kst.st_blocks = 0;
+        kst.st_size = 0;
+        kst.st_dev = 1;
+        kst.st_ino = fd + 1;
+        dprintf("[sys_fstat] fd: %d (fallback), mode: 0x%x, size: %ld, blksize: %ld, dev: %ld, ino: %ld\n", fd, kst.st_mode, kst.st_size, kst.st_blksize, kst.st_dev, kst.st_ino);
+    } else {
+        dprintf("[sys_fstat] fd: %d (invalid/closed)\n", fd);
+        return -EBADF;
     }
 
     if (copy_to_user(user_statbuf, &kst, sizeof(struct stat)) < 0) {
@@ -306,8 +361,11 @@ int64_t sys_newfstatat(int dirfd, const char *user_path, void *user_statbuf, int
         return sys_fstat(dirfd, user_statbuf);
     }
 
+    char clean_path[256];
+    sanitize_path(kpath, clean_path, sizeof(clean_path));
+
     struct vnode *vn = NULL;
-    int err = vfs_lookup(kpath, curproc->p_cwd, &vn);
+    int err = vfs_lookup(clean_path, curproc->p_cwd, &vn);
     if (err < 0) return err;
 
     struct stat kst;
@@ -331,6 +389,9 @@ int64_t sys_newfstatat(int dirfd, const char *user_path, void *user_statbuf, int
         }
     }
     kst.st_blksize = 4096;
+    kst.st_dev = 1;
+    kst.st_ino = (ino_t)vn;
+    kst.st_blocks = (kst.st_size + 511) / 512;
 
     vput(vn);
 
@@ -347,8 +408,11 @@ int64_t sys_stat(const char *user_path, void *user_statbuf) {
     char kpath[256];
     if (copy_str_from_user(kpath, user_path, 256) < 0) return -EFAULT;
 
+    char clean_path[256];
+    sanitize_path(kpath, clean_path, sizeof(clean_path));
+
     struct vnode *vn = NULL;
-    int err = vfs_lookup(kpath, curproc->p_cwd, &vn);
+    int err = vfs_lookup(clean_path, curproc->p_cwd, &vn);
     if (err < 0) return err;
 
     struct stat kst;
@@ -372,6 +436,9 @@ int64_t sys_stat(const char *user_path, void *user_statbuf) {
         }
     }
     kst.st_blksize = 4096;
+    kst.st_dev = 1;
+    kst.st_ino = (ino_t)vn;
+    kst.st_blocks = (kst.st_size + 511) / 512;
 
     vput(vn);
 
@@ -382,12 +449,97 @@ int64_t sys_stat(const char *user_path, void *user_statbuf) {
     return 0;
 }
 
-int64_t sys_ioctl(int fd, uint64_t request, void *arg) {
+int64_t sys_lstat(const char *user_path, void *user_statbuf) {
+    return sys_stat(user_path, user_statbuf);
+}
+
+int64_t sys_readlink(const char *user_path, char *user_buf, size_t user_bufsiz) {
+    if (user_bufsiz == 0) return 0;
+    if (!is_user_address_range(user_buf, user_bufsiz)) {
+        return -EFAULT;
+    }
+
+    char kpath[256];
+    if (copy_str_from_user(kpath, user_path, 256) < 0) return -EFAULT;
+
+    char clean_path[256];
+    sanitize_path(kpath, clean_path, sizeof(clean_path));
+
+    struct vnode *vn = NULL;
+    int err = vfs_lookup_impl(clean_path, curproc->p_cwd, 0, 0, &vn);
+    if (err < 0) {
+        return (int64_t)err;
+    }
+
+    if (vn->type != S_IFLNK) {
+        vput(vn);
+        return -EINVAL;
+    }
+
+    char *target_buf = kmalloc(512);
+    if (!target_buf) {
+        vput(vn);
+        return -ENOMEM;
+    }
+
+    ssize_t n = vn->ops->read(vn, target_buf, 511, 0);
+    vput(vn);
+
+    if (n < 0) {
+        kfree(target_buf);
+        return n;
+    }
+    target_buf[n] = '\0';
+
+    size_t to_copy = (n < (ssize_t)user_bufsiz) ? (size_t)n : user_bufsiz;
+    if (copy_to_user(user_buf, target_buf, to_copy) < 0) {
+        kfree(target_buf);
+        return -EFAULT;
+    }
+
+    kfree(target_buf);
+    return (int64_t)to_copy;
+}
+
+int64_t sys_symlink(const char *user_target, const char *user_linkpath) {
+    char *ktarget = kmalloc(512);
+    char *klinkpath = kmalloc(256);
+    if (!ktarget || !klinkpath) {
+        if (ktarget) kfree(ktarget);
+        if (klinkpath) kfree(klinkpath);
+        return -ENOMEM;
+    }
+
+    if (copy_str_from_user(ktarget, user_target, 512) < 0 ||
+        copy_str_from_user(klinkpath, user_linkpath, 256) < 0) {
+        kfree(ktarget);
+        kfree(klinkpath);
+        return -EFAULT;
+    }
+
+    int err = vfs_symlink(ktarget, klinkpath);
+
+    kfree(ktarget);
+    kfree(klinkpath);
+    return err;
+}
+
+int64_t sys_flock(int fd, int operation) {
+    (void)operation;
+    if (fd < 0 || fd >= MAX_FILES) return -EBADF;
+    struct file *f = curproc->p_fd_table[fd];
+    if (!f) return -EBADF;
+    return 0;
+}
+
+int64_t sys_ioctl(int fd, uint64_t request_raw, void *arg) {
+    uint32_t request = (uint32_t)request_raw;
     if (fd >= 0 && fd < MAX_FILES) {
         struct file *f = curproc->p_fd_table[fd];
         if (f && f->f_vn) {
+            dprintf("[KERNEL sys_ioctl] fd=%d, name='%s', request=0x%x (raw=0x%lx), arg=%p\n", fd, f->f_vn->v_name, request, request_raw, arg);
             if (f->f_vn->ops->ioctl) {
-                return f->f_vn->ops->ioctl(f->f_vn, request, arg);
+                return f->f_vn->ops->ioctl(f->f_vn, (uint64_t)request, arg);
             }
             if (strcmp(f->f_vn->v_name, "fb0") == 0) {
                 if (request == 0x4601) { // FBIOGET_INFO
@@ -444,8 +596,10 @@ int64_t sys_ioctl(int fd, uint64_t request, void *arg) {
                     fb_fix.line_length = g_boot_info.fb.pitch;
                     if (!is_user_address_range(arg, sizeof(fb_fix))) return -EFAULT;
                     if (copy_to_user(arg, &fb_fix, sizeof(fb_fix)) < 0) return -EFAULT;
-                    return 0;
                 }
+            }
+            else if (strcmp(f->f_vn->v_name, "card0") == 0) {
+                return drm_ioctl(f, request, arg);
             }
             else if (strcmp(f->f_vn->v_name, "kbd") == 0 || strcmp(f->f_vn->v_name, "tty") == 0) {
                 if (request == 0x4B33) { // KDGKBTYPE
@@ -502,6 +656,26 @@ int64_t sys_fcntl(int fd, int cmd, uint64_t arg) {
 
     struct file *f = curproc->p_fd_table[fd];
     if (!f) return -EBADF;
+
+    if (cmd == 0 || cmd == 1030) { // F_DUPFD or F_DUPFD_CLOEXEC
+        int minfd = (int)arg;
+        if (minfd < 0 || minfd >= MAX_FILES) return -EINVAL;
+
+        spin_lock(&curproc->p_lock);
+        int newfd = -1;
+        for (int i = minfd; i < MAX_FILES; i++) {
+            if (curproc->p_fd_table[i] == NULL) {
+                curproc->p_fd_table[i] = f;
+                f->f_refcnt++;
+                newfd = i;
+                break;
+            }
+        }
+        spin_unlock(&curproc->p_lock);
+
+        if (newfd == -1) return -EMFILE;
+        return (int64_t)newfd;
+    }
 
     if (cmd == 3) { // F_GETFL
         return (int64_t)f->f_flags;
@@ -568,123 +742,16 @@ int64_t sys_rename(const char *user_old, const char *user_new) {
     return (int64_t)err;
 }
 
-#define PIPE_BUF_SIZE 4096
-
-struct pipe_buffer {
-    char       buf[PIPE_BUF_SIZE];
-    size_t     head;
-    size_t     tail;
-    size_t     size;
-    spinlock_t lock;
-    int        refcnt;
-};
-
-static ssize_t pipe_read(struct vnode *vp, void *buf, size_t n, off_t off) {
-    (void)off;
-    struct pipe_buffer *pb = (struct pipe_buffer *)vp->data;
-    if (!pb) return -EINVAL;
-
-    size_t bytes_read = 0;
-    char *dest = (char *)buf;
-
-    while (bytes_read < n) {
-        spin_lock(&pb->lock);
-        if (pb->size == 0) {
-            if (pb->refcnt < 2) {
-                spin_unlock(&pb->lock);
-                break;
-            }
-            spin_unlock(&pb->lock);
-            thread_yield();
-            continue;
-        }
-
-        while (pb->size > 0 && bytes_read < n) {
-            dest[bytes_read++] = pb->buf[pb->head];
-            pb->head = (pb->head + 1) % PIPE_BUF_SIZE;
-            pb->size--;
-        }
-        spin_unlock(&pb->lock);
-    }
-
-    return (ssize_t)bytes_read;
-}
-
-static ssize_t pipe_write(struct vnode *vp, const void *buf, size_t n, off_t off) {
-    (void)off;
-    struct pipe_buffer *pb = (struct pipe_buffer *)vp->data;
-    if (!pb) return -EINVAL;
-
-    size_t bytes_written = 0;
-    const char *src = (const char *)buf;
-
-    while (bytes_written < n) {
-        spin_lock(&pb->lock);
-        if (pb->refcnt < 2) {
-            spin_unlock(&pb->lock);
-            return bytes_written > 0 ? (ssize_t)bytes_written : -EPIPE;
-        }
-
-        size_t free_space = PIPE_BUF_SIZE - pb->size;
-        if (free_space == 0) {
-            spin_unlock(&pb->lock);
-            thread_yield();
-            continue;
-        }
-
-        while (free_space > 0 && bytes_written < n) {
-            pb->buf[pb->tail] = src[bytes_written++];
-            pb->tail = (pb->tail + 1) % PIPE_BUF_SIZE;
-            pb->size++;
-            free_space--;
-        }
-        spin_unlock(&pb->lock);
-    }
-
-    return (ssize_t)bytes_written;
-}
-
-static int pipe_inactive(struct vnode *vp) {
-    struct pipe_buffer *pb = (struct pipe_buffer *)vp->data;
-    if (pb) {
-        spin_lock(&pb->lock);
-        pb->refcnt--;
-        if (pb->refcnt == 0) {
-            spin_unlock(&pb->lock);
-            kfree(pb);
-        } else {
-            spin_unlock(&pb->lock);
-        }
-    }
-    vp->data = NULL;
-    return 0;
-}
-
-static int pipe_getattr(struct vnode *vp, struct stat *st) {
-    memset(st, 0, sizeof(struct stat));
-    st->st_mode = S_IFIFO | 0666;
-    st->st_nlink = 1;
-    struct pipe_buffer *pb = (struct pipe_buffer *)vp->data;
-    if (pb) {
-        st->st_size = pb->size;
-    }
-    return 0;
-}
-
-static struct vnode_ops pipe_ops = {
-    .read = pipe_read,
-    .write = pipe_write,
-    .inactive = pipe_inactive,
-    .getattr = pipe_getattr,
-};
-
 int64_t sys_access(const char *user_path, int mode) {
     (void)mode;
     char kpath[256];
     if (copy_str_from_user(kpath, user_path, 256) < 0) return -EFAULT;
 
+    char clean_path[256];
+    sanitize_path(kpath, clean_path, sizeof(clean_path));
+
     struct vnode *vn = NULL;
-    int err = vfs_lookup(kpath, curproc->p_cwd, &vn);
+    int err = vfs_lookup(clean_path, curproc->p_cwd, &vn);
     if (err < 0) {
         return (int64_t)err;
     }
@@ -693,77 +760,63 @@ int64_t sys_access(const char *user_path, int mode) {
     return 0;
 }
 
-int64_t sys_pipe(int *user_pipefd) {
-    return sys_pipe2(user_pipefd, 0);
+int64_t sys_faccessat(int dirfd, const char *user_path, int mode, int flags) {
+    (void)dirfd;
+    (void)flags;
+    return sys_access(user_path, mode);
 }
 
-int64_t sys_pipe2(int *user_pipefd, int flags) {
+int64_t sys_faccessat2(int dirfd, const char *user_path, int mode, int flags) {
+    (void)dirfd;
     (void)flags;
-    if (!is_user_address_range(user_pipefd, sizeof(int) * 2)) {
+    return sys_access(user_path, mode);
+}
+
+int64_t sys_getdents64(int fd, void *user_buf, size_t count) {
+    if (!is_user_address_range(user_buf, count)) return -EFAULT;
+
+    void *kbuf = kmalloc(count);
+    if (!kbuf) return -ENOMEM;
+    memset(kbuf, 0, count);
+
+    extern int vfs_readdir(int fd, void *buf, size_t count);
+    int ret = vfs_readdir(fd, kbuf, count);
+    if (ret < 0) {
+        kfree(kbuf);
+        return ret;
+    }
+
+    if (copy_to_user(user_buf, kbuf, ret) < 0) {
+        kfree(kbuf);
         return -EFAULT;
     }
 
-    struct pipe_buffer *pb = kmalloc(sizeof(struct pipe_buffer));
-    if (!pb) return -ENOMEM;
-    memset(pb, 0, sizeof(struct pipe_buffer));
-    spin_lock_init(&pb->lock);
-    pb->refcnt = 2;
+    kfree(kbuf);
+    return ret;
+}
 
-    struct vnode *r_vn = vnode_alloc(S_IFIFO, &pipe_ops);
-    if (!r_vn) {
-        kfree(pb);
-        return -ENOMEM;
-    }
-    r_vn->data = pb;
-
-    struct vnode *w_vn = vnode_alloc(S_IFIFO, &pipe_ops);
-    if (!w_vn) {
-        vput(r_vn);
-        return -ENOMEM;
-    }
-    w_vn->data = pb;
-
-    struct file *rf = file_alloc();
-    if (!rf) {
-        vput(r_vn);
-        vput(w_vn);
-        return -ENOMEM;
-    }
-    rf->f_vn = r_vn;
-    rf->f_flags = O_RDONLY;
-
-    struct file *wf = file_alloc();
-    if (!wf) {
-        file_close(rf);
-        vput(w_vn);
-        return -ENOMEM;
-    }
-    wf->f_vn = w_vn;
-    wf->f_flags = O_WRONLY;
-
-    int r_fd = proc_alloc_fd(curproc, rf);
-    if (r_fd < 0) {
-        file_close(rf);
-        file_close(wf);
-        return r_fd;
+int64_t sys_memfd_create(const char *user_name, unsigned int flags) {
+    char kname[256];
+    if (user_name) {
+        if (copy_str_from_user(kname, user_name, sizeof(kname)) < 0) return -EFAULT;
+    } else {
+        strcpy(kname, "memfd");
     }
 
-    int w_fd = proc_alloc_fd(curproc, wf);
-    if (w_fd < 0) {
-        curproc->p_fd_table[r_fd] = NULL;
-        file_close(rf);
-        file_close(wf);
-        return w_fd;
+    static int memfd_id = 0;
+    char path[512];
+    snprintf(path, sizeof(path), "/tmp/memfd_%d_%s", __sync_fetch_and_add(&memfd_id, 1), kname);
+
+    dprintf("[sys_memfd_create] Creating memfd: %s, flags: 0x%x\n", path, flags);
+
+    int fd_out = -1;
+    int open_flags = O_RDWR | O_CREAT;
+    int err = vfs_open(path, open_flags, 0600, &fd_out);
+    if (err < 0) {
+        dprintf("[sys_memfd_create] Failed to create memfd: %s, error: %d\n", path, err);
+        return (int64_t)err;
     }
 
-    int k_fds[2] = { r_fd, w_fd };
-    if (copy_to_user(user_pipefd, k_fds, sizeof(int) * 2) < 0) {
-        curproc->p_fd_table[r_fd] = NULL;
-        curproc->p_fd_table[w_fd] = NULL;
-        file_close(rf);
-        file_close(wf);
-        return -EFAULT;
-    }
-
-    return 0;
+    dprintf("[sys_memfd_create] Succeeded: fd=%d\n", fd_out);
+    return (int64_t)fd_out;
 }

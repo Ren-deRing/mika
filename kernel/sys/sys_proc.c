@@ -8,6 +8,8 @@
 #include <kernel/exec.h>
 #include <kernel/list.h>
 #include <kernel/syscall.h>
+#include <kernel/version.h>
+
 #include <uapi/elf.h>
 
 #include <kernel/fs/vfs.h>
@@ -69,7 +71,7 @@ int64_t sys_clone(uint64_t flags, void *child_stack, void *ptid, void *ctid, uin
             child_t->t_trapframe->rsp = (uintptr_t)child_stack;
         }
 
-        child_t->t_tid = next_tid++;
+        child_t->t_tid = __sync_fetch_and_add(&next_tid, 1);
         child_t->t_proc = curproc;
         child_t->t_state = THREAD_READY;
         child_t->t_flags = curthread->t_flags;
@@ -110,7 +112,7 @@ int64_t sys_clone(uint64_t flags, void *child_stack, void *ptid, void *ctid, uin
         struct proc *parent_p = curproc;
         struct thread *parent_t = curthread;
 
-        struct proc *child_p = proc_create(next_pid++);
+        struct proc *child_p = proc_create(__sync_fetch_and_add(&next_pid, 1));
         if (!child_p) return -ENOMEM;
 
         child_p->p_parent = parent_p;
@@ -167,7 +169,7 @@ int64_t sys_clone(uint64_t flags, void *child_stack, void *ptid, void *ctid, uin
             child_t->t_trapframe->rsp = (uintptr_t)child_stack;
         }
 
-        child_t->t_tid = next_tid++;
+        child_t->t_tid = __sync_fetch_and_add(&next_tid, 1);
         child_t->t_proc = child_p;
         child_p->p_threads = child_t;
         child_t->t_state = THREAD_READY;
@@ -239,7 +241,7 @@ int64_t sys_fork(void) {
     struct proc *parent_p = curproc;
     struct thread *parent_t = curthread;
 
-    struct proc *child_p = proc_create(next_pid++);
+    struct proc *child_p = proc_create(__sync_fetch_and_add(&next_pid, 1));
     if (!child_p) return -ENOMEM;
 
     child_p->p_parent = parent_p;
@@ -296,7 +298,7 @@ int64_t sys_fork(void) {
         goto err_stack;
     }
 
-    child_t->t_tid = next_tid++;
+    child_t->t_tid = __sync_fetch_and_add(&next_tid, 1);
     child_t->t_proc = child_p;
     child_p->p_threads = child_t;
     child_t->t_state = THREAD_READY;
@@ -391,12 +393,18 @@ int64_t sys_set_tid_address(int *tidptr) {
 int64_t sys_execve(const char *user_path, char *const argv[], char *const envp[]) {
     char kpath[256];
     if (copy_str_from_user(kpath, user_path, 256) < 0) {
+        dprintf("[sys_execve] copy_str_from_user FAILED\n");
         return -EFAULT;
     }
 
+    char clean_path[256];
+    sanitize_path(kpath, clean_path, sizeof(clean_path));
+    dprintf("[sys_execve] Attempting exec: '%s'\n", clean_path);
+
     struct vnode *vn = NULL;
-    int err = vfs_lookup(kpath, curproc->p_cwd, &vn);
+    int err = vfs_lookup(clean_path, curproc->p_cwd, &vn);
     if (err < 0) {
+        dprintf("[sys_execve] vfs_lookup FAILED for '%s', err: %d\n", clean_path, err);
         return err;
     }
 
@@ -418,6 +426,7 @@ int64_t sys_execve(const char *user_path, char *const argv[], char *const envp[]
         int n = vn->ops->read(vn, (void *)((uintptr_t)elf_data + file_size), space_left, file_size);
         
         if (n < 0) {
+            dprintf("[sys_execve] File read FAILED, err: %d\n", n);
             kfree(elf_data);
             vput(vn);
             return n;
@@ -438,15 +447,18 @@ int64_t sys_execve(const char *user_path, char *const argv[], char *const envp[]
     uintptr_t phdr_vaddr = 0;
     uint64_t phnum = 0;
     uintptr_t interpreter_base = 0;
+    
+    dprintf("[sys_execve] Reading ELF header, e_type: %d, e_entry: %p\n", ehdr->e_type, ehdr->e_entry);
     page_table_t *new_map = load_elf(elf_data, &entry_point, &brk, &phdr_vaddr, &phnum, &interpreter_base);
     
     kfree(elf_data);
     
     if (!new_map) {
-        dprintf("load_elf FAILED! Invalid ELF Magic or Format.\n");
+        dprintf("[sys_execve] load_elf FAILED! Invalid ELF Magic or Format for '%s'\n", clean_path);
         return -ENOEXEC; 
     }
 
+    dprintf("[sys_execve] load_elf SUCCESS! entry: %p, interpreter_base: %p\n", entry_point, interpreter_base);
     uintptr_t stack_top = USER_STACK_TOP;
     uintptr_t stack_bottom = USER_STACK_TOP - USER_STACK_SIZE;
 
@@ -557,4 +569,69 @@ int64_t sys_getpid(void) {
         return curproc->p_pid;
     }
     return 1;
+}
+
+struct utsname {
+    char sysname[65];
+    char nodename[65];
+    char release[65];
+    char version[65];
+    char machine[65];
+    char domainname[65];
+};
+
+int64_t sys_uname(void *user_buf) {
+    if (!is_user_address_range(user_buf, sizeof(struct utsname))) {
+        return -EFAULT;
+    }
+
+    struct utsname kbuf;
+    memset(&kbuf, 0, sizeof(struct utsname));
+    strncpy(kbuf.sysname, __kernel_name, 64);
+    strncpy(kbuf.nodename, "mika-qemu", 64);
+    strncpy(kbuf.release, __kernel_release, 64);
+    strncpy(kbuf.version, __kernel_version, 64);
+    strncpy(kbuf.machine, __kernel_machine, 64);
+    strncpy(kbuf.domainname, "mika.local", 64);
+
+    if (copy_to_user(user_buf, &kbuf, sizeof(struct utsname)) < 0) {
+        return -EFAULT;
+    }
+
+    return 0;
+}
+
+int64_t sys_getuid(void) {
+    return 0;
+}
+
+int64_t sys_getgid(void) {
+    return 0;
+}
+
+int64_t sys_geteuid(void) {
+    return 0;
+}
+
+int64_t sys_getegid(void) {
+    return 0;
+}
+
+int64_t sys_lchown(const char *user_path, uid_t owner, gid_t group) {
+    (void)user_path;
+    (void)owner;
+    (void)group;
+    return 0;
+}
+
+int64_t sys_setsid(void) {
+    if (!curproc) return -EINVAL;
+    return curproc->p_pid;
+}
+
+int64_t sys_setresuid(uid_t ruid, uid_t euid, uid_t suid) {
+    (void)ruid;
+    (void)euid;
+    (void)suid;
+    return 0;
 }

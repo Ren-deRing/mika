@@ -197,3 +197,66 @@ int64_t sys_rt_sigprocmask(int how, const void *set, void *oset, size_t sigsetsi
     }
     return 0;
 }
+
+int64_t sys_tkill(int tid, int sig) {
+    if (sig < 1 || sig >= NSIG) {
+        return -EINVAL;
+    }
+
+    struct proc *p = curproc;
+    if (!p) return -ESRCH;
+
+    uint64_t flags = spin_lock_irqsave(&p->p_lock);
+    struct thread *t = p->p_threads;
+    struct thread *target = NULL;
+
+    while (t) {
+        if (t->t_tid == tid) {
+            target = t;
+            break;
+        }
+        t = t->t_proc_next;
+    }
+
+    if (!target) {
+        spin_unlock_irqrestore(&p->p_lock, flags);
+        return -ESRCH;
+    }
+
+    target->t_sig_pending |= (1ULL << (sig - 1));
+    spin_unlock_irqrestore(&p->p_lock, flags);
+
+    thread_signal_wakeup(target);
+    return 0;
+}
+
+int64_t sys_tgkill(int tgid, int tid, int sig) {
+    struct proc *p = find_proc(tgid);
+    if (!p) return -ESRCH;
+
+    uint64_t flags = spin_lock_irqsave(&p->p_lock);
+    struct thread *t = p->p_threads;
+    struct thread *target = NULL;
+
+    while (t) {
+        if (t->t_tid == tid) {
+            target = t;
+            break;
+        }
+        t = t->t_proc_next;
+    }
+
+    if (!target) {
+        spin_unlock_irqrestore(&p->p_lock, flags);
+        proc_put(p);
+        return -ESRCH;
+    }
+
+    target->t_sig_pending |= (1ULL << (sig - 1));
+    spin_unlock_irqrestore(&p->p_lock, flags);
+
+    thread_signal_wakeup(target);
+    proc_put(p);
+    return 0;
+}
+

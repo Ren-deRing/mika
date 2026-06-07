@@ -104,6 +104,19 @@ int64_t sys_clock_gettime(int clk_id, void *user_tp) {
     return 0;
 }
 
+int64_t sys_clock_getres(int clk_id, void *user_tp) {
+    (void)clk_id;
+    struct { int64_t tv_sec; int64_t tv_nsec; } tp;
+    tp.tv_sec = 0;
+    tp.tv_nsec = 1;
+
+    if (user_tp) {
+        if (!is_user_address_range(user_tp, sizeof(tp))) return -EFAULT;
+        if (copy_to_user(user_tp, &tp, sizeof(tp)) < 0) return -EFAULT;
+    }
+    return 0;
+}
+
 int64_t sys_getrlimit(int resource, void *user_rlim) {
     (void)resource;
     struct { uint64_t cur, max; } rl = { 8*1024*1024UL, (uint64_t)-1 };
@@ -185,5 +198,45 @@ int64_t sys_nanosleep(const struct timespec *user_req, struct timespec *user_rem
     }
 
     return 0;
+}
+
+int64_t sys_getrandom(void *buf, size_t buflen, unsigned int flags) {
+    (void)flags;
+    if (buflen > 0 && !is_user_address_range(buf, buflen)) {
+        return -EFAULT;
+    }
+
+    uint8_t chunk[256];
+    size_t total = 0;
+    while (total < buflen) {
+        size_t to_copy = buflen - total;
+        if (to_copy > sizeof(chunk)) {
+            to_copy = sizeof(chunk);
+        }
+        for (size_t i = 0; i < to_copy; i++) {
+            static uint64_t rand_val = 0;
+            static int bytes_left = 0;
+            if (bytes_left == 0) {
+                static uint64_t xorshift_state = 0x123456789abcdef0ULL;
+                uint32_t lo = 0, hi = 0;
+                __asm__ __volatile__ ("rdtsc" : "=a"(lo), "=d"(hi));
+                uint64_t x = xorshift_state ^ (((uint64_t)hi << 32) | lo);
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                xorshift_state = x;
+                rand_val = x;
+                bytes_left = 8;
+            }
+            chunk[i] = (uint8_t)(rand_val & 0xFF);
+            rand_val >>= 8;
+            bytes_left--;
+        }
+        if (copy_to_user((char *)buf + total, chunk, to_copy) < 0) {
+            return -EFAULT;
+        }
+        total += to_copy;
+    }
+    return (int64_t)buflen;
 }
 

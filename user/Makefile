@@ -26,7 +26,7 @@ $(USER_PROGS): $(U_OBJS)
 	mkdir -p $(USER_BIN_DIR); \
 	$(LD) -m elf_x86_64 -nostdlib -pie \
 		-dynamic-linker /lib/ld-musl-x86_64.so.1 \
-		-L$(MUSL_OUT_DIR)/lib -lc \
+		-L$(MUSL_OUT_DIR)/lib -lc -lgbm \
 		-z separate-code -z max-page-size=0x1000 \
 		$(MUSL_OUT_DIR)/lib/crt1.o \
 		$(MUSL_OUT_DIR)/lib/crti.o \
