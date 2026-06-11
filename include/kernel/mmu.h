@@ -8,6 +8,7 @@
 #define PAGE_SIZE       4096
 #define PAGE_SIZE_2M    (2ULL * 1024 * 1024)
 #define MAX_ORDER       11
+#define KERNEL_BASE     0xFFFF800000000000ULL
 
 #define MMU_FLAGS_READ     (1ULL << 0)
 #define MMU_FLAGS_WRITE    (1ULL << 1)
@@ -41,6 +42,7 @@ struct page {
     
     void* free_ptr;
     uintptr_t    vaddr;
+    void*        pg_proc;
 };
 
 typedef struct page_table page_table_t;
@@ -71,3 +73,4 @@ void mmu_destroy_map(page_table_t* map);
 void mmu_flush_cache(void* addr, size_t size);
 
 void mmu_tlb_shootdown(void);
+void mmu_tlb_shootdown_ex(page_table_t* map, uintptr_t vaddr);

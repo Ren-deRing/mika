@@ -90,6 +90,8 @@ struct proc* proc_create(pid_t pid) {
     memset(p, 0, sizeof(struct proc));
     p->p_pid = pid;
     spin_lock_init(&p->p_lock);
+    spin_lock_init(&p->p_vm_lock);
+    p->p_active_cpus = 0;
 
     list_init(&p->p_children);
     list_init(&p->p_wait_queue);
@@ -110,6 +112,13 @@ struct proc* proc_create(pid_t pid) {
         if (!p->p_vm_map) {
             proc_free(p);
             return NULL;
+        }
+    }
+    
+    if (p->p_vm_map) {
+        page_t* pg = phys_to_page(v2p(p->p_vm_map));
+        if (pg) {
+            pg->pg_proc = p;
         }
     }
     

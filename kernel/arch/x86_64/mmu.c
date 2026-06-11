@@ -18,7 +18,19 @@
 #include <kernel/lock.h>
 #include <kernel/intc.h>
 
-static spinlock_t g_mmu_lock = SPINLOCK_INITIALIZER;
+static spinlock_t g_kernel_mmu_lock = SPINLOCK_INITIALIZER;
+
+#include <kernel/proc.h>
+
+static inline spinlock_t* mmu_get_lock(page_table_t* map) {
+    if (!map) return &g_kernel_mmu_lock;
+    page_t* pg = phys_to_page(v2p(map));
+    if (pg && pg->pg_proc) {
+        struct proc* p = (struct proc*)pg->pg_proc;
+        return &p->p_vm_lock;
+    }
+    return &g_kernel_mmu_lock;
+}
 
 void handle_page_fault(struct trapframe *regs, void *data);
 
@@ -572,7 +584,7 @@ uint64_t vmm_get_phys(page_table_t* pml4, uint64_t virt) {
     pt_entry_t pd_entry = current_table->entries[indices[2]];
     if (!(pd_entry & X86_PTE_PRESENT)) return 0;
 
-    // Huge Page(
+    // Huge Page
     if (pd_entry & X86_PTE_HUGE) {
         return (pd_entry & 0xFFFFFFFE00000ull) + (virt & 0x1FFFFFull); // 21비트 offset
     }
@@ -678,9 +690,10 @@ page_table_t* mmu_create_map(void) {
 }
 
 void mmu_destroy_map(page_table_t* map) {
-    uint64_t lock_flags = spin_lock_irqsave(&g_mmu_lock);
+    spinlock_t* lock = mmu_get_lock(map);
+    uint64_t lock_flags = spin_lock_irqsave(lock);
     vmm_destroy_map(map);
-    spin_unlock_irqrestore(&g_mmu_lock, lock_flags);
+    spin_unlock_irqrestore(lock, lock_flags);
 }
 
 page_t* page_alloc(uint8_t order) {
@@ -693,7 +706,8 @@ void page_free(page_t* page, uint8_t order) {
 
 bool mmu_map(page_table_t* map, uintptr_t vaddr, uintptr_t paddr, uint64_t prot) {
     uint64_t x86_flags = mmu_to_x86_flags(prot);
-    uint64_t lock_flags = spin_lock_irqsave(&g_mmu_lock);
+    spinlock_t* lock = mmu_get_lock(map);
+    uint64_t lock_flags = spin_lock_irqsave(lock);
     bool ret;
 
     if ((vaddr % PAGE_SIZE_2M == 0) && (paddr % PAGE_SIZE_2M == 0)) {
@@ -702,22 +716,23 @@ bool mmu_map(page_table_t* map, uintptr_t vaddr, uintptr_t paddr, uint64_t prot)
         ret = vmm_map(map, (uint64_t)vaddr, (uint64_t)paddr, x86_flags);
     }
 
-    spin_unlock_irqrestore(&g_mmu_lock, lock_flags);
+    spin_unlock_irqrestore(lock, lock_flags);
 
     if (ret) {
-        mmu_tlb_shootdown();
+        mmu_tlb_shootdown_ex(map, vaddr);
     }
     return ret;
 }
 
 bool mmu_map_4k(page_table_t* map, uintptr_t vaddr, uintptr_t paddr, uint64_t prot) {
     uint64_t x86_flags = mmu_to_x86_flags(prot);
-    uint64_t lock_flags = spin_lock_irqsave(&g_mmu_lock);
+    spinlock_t* lock = mmu_get_lock(map);
+    uint64_t lock_flags = spin_lock_irqsave(lock);
     bool ret = vmm_map(map, (uint64_t)vaddr, (uint64_t)paddr, x86_flags);
-    spin_unlock_irqrestore(&g_mmu_lock, lock_flags);
+    spin_unlock_irqrestore(lock, lock_flags);
 
     if (ret) {
-        mmu_tlb_shootdown();
+        mmu_tlb_shootdown_ex(map, vaddr);
     }
     return ret;
 }
@@ -728,10 +743,11 @@ bool mmu_map_demand(page_table_t* map, uintptr_t vaddr, uint64_t prot) {
     x86_flags &= ~X86_PTE_PRESENT;
     x86_flags |= X86_PTE_DEMAND;
 
-    uint64_t lock_flags = spin_lock_irqsave(&g_mmu_lock);
+    spinlock_t* lock = mmu_get_lock(map);
+    uint64_t lock_flags = spin_lock_irqsave(lock);
     pt_entry_t* pte = vmm_get_pte(map, (uint64_t)vaddr, true);
     if (!pte) {
-        spin_unlock_irqrestore(&g_mmu_lock, lock_flags);
+        spin_unlock_irqrestore(lock, lock_flags);
         return false;
     }
 
@@ -742,25 +758,27 @@ bool mmu_map_demand(page_table_t* map, uintptr_t vaddr, uint64_t prot) {
     }
 
     *pte = x86_flags;
-    spin_unlock_irqrestore(&g_mmu_lock, lock_flags);
+    spin_unlock_irqrestore(lock, lock_flags);
 
-    mmu_tlb_shootdown();
+    mmu_tlb_shootdown_ex(map, vaddr);
     return true;
 }
 
 void mmu_unmap(page_table_t* map, uintptr_t vaddr) {
-    uint64_t lock_flags = spin_lock_irqsave(&g_mmu_lock);
+    spinlock_t* lock = mmu_get_lock(map);
+    uint64_t lock_flags = spin_lock_irqsave(lock);
     vmm_unmap(map, (uint64_t)vaddr);
-    spin_unlock_irqrestore(&g_mmu_lock, lock_flags);
+    spin_unlock_irqrestore(lock, lock_flags);
 
-    mmu_tlb_shootdown();
+    mmu_tlb_shootdown_ex(map, vaddr);
 }
 
 uintptr_t mmu_translate(page_table_t* map, uintptr_t vaddr) {
     if (!map) return 0;
     uint64_t phys = vmm_get_phys(map, (uint64_t)vaddr);
     if (phys == 0) {
-        uint64_t lock_flags = spin_lock_irqsave(&g_mmu_lock);
+        spinlock_t* lock = mmu_get_lock(map);
+        uint64_t lock_flags = spin_lock_irqsave(lock);
         pt_entry_t *pte = vmm_get_pte(map, (uint64_t)vaddr, false);
         if (pte && (*pte & X86_PTE_DEMAND) && !(*pte & X86_PTE_PRESENT)) {
             page_t *pg = page_alloc(0);
@@ -776,7 +794,7 @@ uintptr_t mmu_translate(page_table_t* map, uintptr_t vaddr) {
                 invlpg((uint64_t)vaddr);
             }
         }
-        spin_unlock_irqrestore(&g_mmu_lock, lock_flags);
+        spin_unlock_irqrestore(lock, lock_flags);
     }
     return (uintptr_t)phys;
 }
@@ -790,7 +808,8 @@ page_table_t* mmu_get_kernel_map(void) {
 }
 
 void mmu_protect_page(page_table_t* map, uintptr_t vaddr, int prot) {
-    uint64_t lock_flags = spin_lock_irqsave(&g_mmu_lock);
+    spinlock_t* lock = mmu_get_lock(map);
+    uint64_t lock_flags = spin_lock_irqsave(lock);
     pt_entry_t* pte = vmm_get_pte(map, (uint64_t)vaddr, false);
     
     if (pte && ((*pte & X86_PTE_PRESENT) || (*pte & X86_PTE_DEMAND))) {
@@ -820,7 +839,9 @@ void mmu_protect_page(page_table_t* map, uintptr_t vaddr, int prot) {
 
         invlpg((uint64_t)vaddr);
     }
-    spin_unlock_irqrestore(&g_mmu_lock, lock_flags);
+    spin_unlock_irqrestore(lock, lock_flags);
+
+    mmu_tlb_shootdown_ex(map, vaddr);
 }
 
 page_table_t *mmu_clone_map(page_table_t *parent_map) {
@@ -829,7 +850,8 @@ page_table_t *mmu_clone_map(page_table_t *parent_map) {
     page_table_t *child_map = mmu_create_map();
     if (!child_map) return NULL;
 
-    uint64_t lock_flags = spin_lock_irqsave(&g_mmu_lock);
+    spinlock_t* lock = mmu_get_lock(parent_map);
+    uint64_t lock_flags = spin_lock_irqsave(lock);
     for (int i = 0; i < 256; i++) {
         pt_entry_t pml4e = parent_map->entries[i];
         if (!(pml4e & X86_PTE_PRESENT)) continue;
@@ -851,7 +873,7 @@ page_table_t *mmu_clone_map(page_table_t *parent_map) {
 
                     page_t *child_page = page_alloc(9);
                     if (!child_page) {
-                        spin_unlock_irqrestore(&g_mmu_lock, lock_flags);
+                        spin_unlock_irqrestore(lock, lock_flags);
                         mmu_destroy_map(child_map);
                         return NULL;
                     }
@@ -899,7 +921,7 @@ page_table_t *mmu_clone_map(page_table_t *parent_map) {
             }
         }
     }
-    spin_unlock_irqrestore(&g_mmu_lock, lock_flags);
+    spin_unlock_irqrestore(lock, lock_flags);
 
     return child_map;
 }
@@ -921,12 +943,13 @@ void handle_page_fault(struct trapframe *regs, void *data) {
     if ((err_code & 1) == 0) { // Page not present
         page_table_t *map = mmu_get_active_map();
         if (map) {
-            uint64_t lock_flags = spin_lock_irqsave(&g_mmu_lock);
+            spinlock_t* lock = mmu_get_lock(map);
+            uint64_t lock_flags = spin_lock_irqsave(lock);
             pt_entry_t *pte = vmm_get_pte(map, fault_addr, false);
             if (pte && (*pte & X86_PTE_DEMAND) && !(*pte & X86_PTE_PRESENT)) {
                 page_t *pg = page_alloc(0);
                 if (!pg) {
-                    spin_unlock_irqrestore(&g_mmu_lock, lock_flags);
+                    spin_unlock_irqrestore(lock, lock_flags);
                     panic("Demand Paging: Out of physical memory", regs);
                 }
                 uint64_t phys_addr = page_to_phys(pg);
@@ -939,17 +962,18 @@ void handle_page_fault(struct trapframe *regs, void *data) {
                 *pte = phys_addr | original_flags;
 
                 invlpg((uint64_t)fault_addr);
-                spin_unlock_irqrestore(&g_mmu_lock, lock_flags);
+                spin_unlock_irqrestore(lock, lock_flags);
                 return;
             }
-            spin_unlock_irqrestore(&g_mmu_lock, lock_flags);
+            spin_unlock_irqrestore(lock, lock_flags);
         }
     }
 
     if ((err_code & 3) == 3) {
         page_table_t *map = mmu_get_active_map();
         if (map) {
-            uint64_t lock_flags = spin_lock_irqsave(&g_mmu_lock);
+            spinlock_t* lock = mmu_get_lock(map);
+            uint64_t lock_flags = spin_lock_irqsave(lock);
             pt_entry_t *pte = vmm_get_pte(map, fault_addr, false);
             if (pte && (*pte & X86_PTE_PRESENT) && (*pte & X86_PTE_COW)) {
                 uint64_t old_phys = *pte & PAGE_ADDR_MASK;
@@ -959,14 +983,14 @@ void handle_page_fault(struct trapframe *regs, void *data) {
                     if (pg->ref_count > 1) {
                         page_t *new_pg = page_alloc(0);
                         if (!new_pg) {
-                            spin_unlock_irqrestore(&g_mmu_lock, lock_flags);
+                            spin_unlock_irqrestore(lock, lock_flags);
                             panic("CoW: Out of physical memory", regs);
                         }
                         uint64_t new_phys = page_to_phys(new_pg);
                         
-                        spin_unlock_irqrestore(&g_mmu_lock, lock_flags);
+                        spin_unlock_irqrestore(lock, lock_flags);
                         memcpy(p2v(new_phys), p2v(old_phys), PAGE_SIZE);      
-                        lock_flags = spin_lock_irqsave(&g_mmu_lock);
+                        lock_flags = spin_lock_irqsave(lock);
                         
                         pt_entry_t *re_pte = vmm_get_pte(map, fault_addr, false);
                         if (re_pte && re_pte == pte && (*re_pte & X86_PTE_PRESENT) && (*re_pte & X86_PTE_COW) && ((*re_pte & PAGE_ADDR_MASK) == old_phys)) {
@@ -997,11 +1021,11 @@ void handle_page_fault(struct trapframe *regs, void *data) {
                     }
                     
                     invlpg((uint64_t)fault_addr);
-                    spin_unlock_irqrestore(&g_mmu_lock, lock_flags);
+                    spin_unlock_irqrestore(lock, lock_flags);
                     return;
                 }
             }
-            spin_unlock_irqrestore(&g_mmu_lock, lock_flags);
+            spin_unlock_irqrestore(lock, lock_flags);
         }
     }
 
@@ -1031,32 +1055,54 @@ void mmu_flush_cache(void* addr, size_t size) {
     }
 }
 
-void mmu_tlb_shootdown(void) {
-    if (g_intc && g_intc->send_ipi) {
-        struct cpu *this_cpu = curcpu;
+void mmu_tlb_shootdown_ex(page_table_t* map, uintptr_t vaddr) {
+    if (!g_intc || !g_intc->send_ipi) return;
+    
+    struct cpu *this_cpu = curcpu;
+    uint32_t this_cpu_id = this_cpu ? this_cpu->id : 0;
+    
+    page_t* pg = map ? phys_to_page(v2p(map)) : NULL;
+    struct proc* proc = pg ? (struct proc*)pg->pg_proc : NULL;
+
+    if (vaddr >= KERNEL_BASE || !proc || proc->p_pid == 0) {
+        // 으악 커널 shootdown이다 다들 도망가요
         for (uint32_t i = 0; i < g_boot_info.smp.total_cores; i++) {
-            if (i != this_cpu->id) {
+            if (i != this_cpu_id) {
+                g_intc->send_ipi(cpus[i].hw_id, 0x46);
+            }
+        }
+    } else {
+        // 실행 중인 놈만 끌고오기
+        uint64_t targets = proc->p_active_cpus;
+        for (uint32_t i = 0; i < g_boot_info.smp.total_cores; i++) {
+            if (i != this_cpu_id && (targets & (1ULL << i))) {
                 g_intc->send_ipi(cpus[i].hw_id, 0x46);
             }
         }
     }
 }
 
+void mmu_tlb_shootdown(void) {
+    mmu_tlb_shootdown_ex(NULL, KERNEL_BASE);
+}
+
 bool mmu_is_mapped(page_table_t* map, uintptr_t virt) {
     if (!map) return false;
-    uint64_t lock_flags = spin_lock_irqsave(&g_mmu_lock);
+    spinlock_t* lock = mmu_get_lock(map);
+    uint64_t lock_flags = spin_lock_irqsave(lock);
     pt_entry_t *pte = vmm_get_pte(map, (uint64_t)virt, false);
     bool ret = false;
     if (pte && (*pte & (X86_PTE_PRESENT | X86_PTE_DEMAND))) {
         ret = true;
     }
-    spin_unlock_irqrestore(&g_mmu_lock, lock_flags);
+    spin_unlock_irqrestore(lock, lock_flags);
     return ret;
 }
 
 uint64_t mmu_get_flags(page_table_t* map, uintptr_t virt) {
     if (!map) return 0;
-    uint64_t lock_flags = spin_lock_irqsave(&g_mmu_lock);
+    spinlock_t* lock = mmu_get_lock(map);
+    uint64_t lock_flags = spin_lock_irqsave(lock);
     pt_entry_t *pte = vmm_get_pte(map, (uint64_t)virt, false);
     uint64_t flags = 0;
     if (pte && ((*pte & X86_PTE_PRESENT) || (*pte & X86_PTE_DEMAND))) {
@@ -1074,7 +1120,7 @@ uint64_t mmu_get_flags(page_table_t* map, uintptr_t virt) {
             flags |= MMU_FLAGS_USER;
         }
     }
-    spin_unlock_irqrestore(&g_mmu_lock, lock_flags);
+    spin_unlock_irqrestore(lock, lock_flags);
     return flags;
 }
 

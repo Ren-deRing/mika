@@ -134,6 +134,15 @@ void arch_thread_destroy(struct thread *t) {
 }
 
 void arch_switch_mm(struct proc *prev, struct proc *next) {
+    uint32_t cpu_id = curcpu ? curcpu->id : 0;
+
+    if (prev && prev->p_pid != 0) {
+        __atomic_and_fetch(&prev->p_active_cpus, ~(1ULL << cpu_id), __ATOMIC_RELAXED);
+    }
+    if (next && next->p_pid != 0) {
+        __atomic_or_fetch(&next->p_active_cpus, (1ULL << cpu_id), __ATOMIC_RELAXED);
+    }
+
     if (next->p_vm_map) {
         uintptr_t next_cr3 = v2p(next->p_vm_map);
         uintptr_t curr_cr3;

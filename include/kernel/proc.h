@@ -108,6 +108,8 @@ struct proc {
     gid_t           p_gid, p_egid;
     proc_state_t    p_state;
     spinlock_t      p_lock;
+    spinlock_t      p_vm_lock;
+    uint64_t        p_active_cpus;
 
     char            p_name[16];
     mode_t          p_umask;

@@ -143,6 +143,12 @@ int64_t sys_clone(uint64_t flags, void *child_stack, void *ptid, void *ctid, uin
         if (!child_p->p_vm_map) {
             goto err_proc;
         }
+        if (child_p->p_vm_map) {
+            page_t* pg = phys_to_page(v2p(child_p->p_vm_map));
+            if (pg) {
+                pg->pg_proc = child_p;
+            }
+        }
         child_p->p_entry = parent_p->p_entry;
         child_p->p_stack_top = parent_p->p_stack_top;
         child_p->p_brk = parent_p->p_brk;
@@ -271,6 +277,12 @@ int64_t sys_fork(void) {
     child_p->p_vm_map = mmu_clone_map(parent_p->p_vm_map);
     if (!child_p->p_vm_map) {
         goto err_proc;
+    }
+    if (child_p->p_vm_map) {
+        page_t* pg = phys_to_page(v2p(child_p->p_vm_map));
+        if (pg) {
+            pg->pg_proc = child_p;
+        }
     }
     
     extern void shm_fork_copy(struct proc *parent, struct proc *child);
