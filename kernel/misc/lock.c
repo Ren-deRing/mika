@@ -81,8 +81,8 @@ void mutex_lock(mutex_t *m) {
         t->t_lock_to_release = &m->wait_lock;
         list_add_tail(&t->t_wait_node, &m->wait_queue);
 
-        arch_irq_restore(flags);
         thread_yield();
+        arch_irq_restore(flags);
     }
 }
 

@@ -571,8 +571,8 @@ int64_t sys_wait4(pid_t pid, int *user_wstatus, int options, void *user_rusage) 
         t->t_lock_to_release = &parent->p_lock;
         list_add_tail(&t->t_wait_node, &parent->p_wait_queue);
 
-        arch_irq_restore(lock_flags);
         thread_yield();
+        arch_irq_restore(lock_flags);
     }
 }
 

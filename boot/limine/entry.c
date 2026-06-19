@@ -85,10 +85,11 @@ void boot_entry(void) {
         }
         g_boot_info.smp.cores = g_core_storage;
 
-        for (uint32_t i = 0; i < smp->cpu_count; i++) {
+        for (uint32_t i = 0; i < g_boot_info.smp.total_cores; i++) {
             if (smp->cpus[i]->lapic_id == smp->bsp_lapic_id) continue;
-            smp->cpus[i]->goto_address = limine_ap_entry; 
             smp->cpus[i]->extra_argument = (uintptr_t)&g_core_storage[i];
+            __sync_synchronize();
+            smp->cpus[i]->goto_address = limine_ap_entry; 
         }
     }
 
