@@ -660,4 +660,18 @@ int vfs_rename(const char *oldpath, const char *newpath) {
     return err;
 }
 
+struct file *fdget(int fd) {
+    if (fd < 0 || fd >= MAX_FILES) return NULL;
+    struct proc *p = curproc;
+    uint64_t flags = spin_lock_irqsave(&p->p_lock);
+    struct file *f = p->p_fd_table[fd];
+    if (f) __atomic_fetch_add(&f->f_refcnt, 1, __ATOMIC_SEQ_CST);
+    spin_unlock_irqrestore(&p->p_lock, flags);
+    return f;
+}
+
+void fdput(struct file *f) {
+    if (f) file_close(f);
+}
+
 subsys_initcall(vfs_init);

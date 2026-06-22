@@ -1,11 +1,15 @@
 #pragma once
 
 #include <kernel/fs/vnode.h>
+#include <kernel/fs/file.h>
 
 extern struct vnode *g_root_vnode;
 
 void vfs_init(void);
 void vfs_load_initrd(uintptr_t addr, uint64_t size);
+
+struct file *fdget(int fd);
+void fdput(struct file *f);
 
 int vfs_lookup(const char *path, struct vnode *base, struct vnode **vpp);
 int vfs_lookup_impl(const char *path, struct vnode *base, int follow_last, int depth, struct vnode **vpp);

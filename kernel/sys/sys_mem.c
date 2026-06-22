@@ -176,8 +176,16 @@ int64_t sys_mmap(uintptr_t addr, size_t length, int prot, int flags, int fd, int
     uintptr_t end = ALIGN_UP(addr + length, PAGE_SIZE);
 
     struct file *f = NULL;
+    struct vnode *mapped_vn = NULL;
+
     if (fd >= 0 && fd < MAX_FILES) {
+        uint64_t proc_flags = spin_lock_irqsave(&curproc->p_lock);
         f = curproc->p_fd_table[fd];
+        if (f && f->f_vn) {
+            mapped_vn = f->f_vn;
+            vref(mapped_vn);
+        }
+        spin_unlock_irqrestore(&curproc->p_lock, proc_flags);
     }
 
     for (uintptr_t i = start; i < end; i += PAGE_SIZE) {
@@ -187,8 +195,9 @@ int64_t sys_mmap(uintptr_t addr, size_t length, int prot, int flags, int fd, int
         if (prot & 0x4) mmu_flags |= MMU_FLAGS_EXEC; // PROT_EXEC
         if (flags & 0x1) mmu_flags |= MMU_FLAGS_SHARED; // MAP_SHARED
 
-        if (f == NULL) {
+        if (mapped_vn == NULL) {
             if (!mmu_map_demand(curproc->p_vm_map, i, mmu_flags)) {
+                if (mapped_vn) vput(mapped_vn);
                 return -ENOMEM;
             }
         } else {
@@ -201,7 +210,7 @@ int64_t sys_mmap(uintptr_t addr, size_t length, int prot, int flags, int fd, int
                 struct vnode *to_put = NULL;
                 uint64_t lock_flags = spin_lock_irqsave(&g_shared_pages_lock);
                 for (int s = 0; s < MAX_SHARED_PAGES; s++) {
-                    if (g_shared_pages[s].vn == f->f_vn && g_shared_pages[s].file_offset == file_offset) {
+                    if (g_shared_pages[s].vn == mapped_vn && g_shared_pages[s].file_offset == file_offset) {
                         uintptr_t cached_paddr = g_shared_pages[s].phys_addr;
                         page_t *pg = phys_to_page(cached_paddr);
                         if (pg && pg->is_free) {
@@ -230,7 +239,13 @@ int64_t sys_mmap(uintptr_t addr, size_t length, int prot, int flags, int fd, int
                 uintptr_t allocated_paddr = page_to_phys(pg);
                 memset(p2v(allocated_paddr), 0, PAGE_SIZE);
 
-                int n = f->f_vn->ops->read(f->f_vn, p2v(allocated_paddr), PAGE_SIZE, file_offset);
+                if (!mapped_vn->ops || !mapped_vn->ops->read) {
+                    page_free(pg, 0);
+                    if (mapped_vn) vput(mapped_vn);
+                    return -EBADF;
+                }
+
+                int n = mapped_vn->ops->read(mapped_vn, p2v(allocated_paddr), PAGE_SIZE, file_offset);
                 if (n < 0) {
                     dprintf("[KERNEL sys_mmap] File read error %d at offset %ld\n", n, file_offset);
                     page_free(pg, 0);
@@ -244,11 +259,11 @@ int64_t sys_mmap(uintptr_t addr, size_t length, int prot, int flags, int fd, int
                     uintptr_t double_check_paddr = 0;
                     struct vnode *to_put_dc = NULL;
                     for (int s = 0; s < MAX_SHARED_PAGES; s++) {
-                        if (g_shared_pages[s].vn == f->f_vn && g_shared_pages[s].file_offset == file_offset) {
+                        if (g_shared_pages[s].vn == mapped_vn && g_shared_pages[s].file_offset == file_offset) {
                             uintptr_t cached_paddr = g_shared_pages[s].phys_addr;
                             page_t *cached_pg = phys_to_page(cached_paddr);
                             if (cached_pg && cached_pg->is_free) {
-                                to_put_dc = f->f_vn;
+                                to_put_dc = mapped_vn;
                                 g_shared_pages[s].vn = NULL;
                                 g_shared_pages[s].file_offset = 0;
                                 g_shared_pages[s].phys_addr = 0;
@@ -270,8 +285,8 @@ int64_t sys_mmap(uintptr_t addr, size_t length, int prot, int flags, int fd, int
                         bool registered = false;
                         for (int s = 0; s < MAX_SHARED_PAGES; s++) {
                             if (g_shared_pages[s].vn == NULL) {
-                                g_shared_pages[s].vn = f->f_vn;
-                                vref(f->f_vn);
+                                g_shared_pages[s].vn = mapped_vn;
+                                vref(mapped_vn);
                                 g_shared_pages[s].file_offset = file_offset;
                                 g_shared_pages[s].phys_addr = allocated_paddr;
                                 registered = true;
@@ -302,7 +317,7 @@ int64_t sys_mmap(uintptr_t addr, size_t length, int prot, int flags, int fd, int
                         struct vnode *to_put_err = NULL;
                         uint64_t lock_flags = spin_lock_irqsave(&g_shared_pages_lock);
                         for (int s = 0; s < MAX_SHARED_PAGES; s++) {
-                            if (g_shared_pages[s].vn == f->f_vn && g_shared_pages[s].file_offset == file_offset) {
+                        if (g_shared_pages[s].vn == mapped_vn && g_shared_pages[s].file_offset == file_offset) {
                                 to_put_err = g_shared_pages[s].vn;
                                 g_shared_pages[s].vn = NULL;
                                 g_shared_pages[s].file_offset = 0;
@@ -321,6 +336,10 @@ int64_t sys_mmap(uintptr_t addr, size_t length, int prot, int flags, int fd, int
                 return -ENOMEM;
             }
         }
+    }
+
+    if (mapped_vn) {
+        vput(mapped_vn);
     }
 
     return addr;

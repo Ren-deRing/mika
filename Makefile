@@ -118,7 +118,6 @@ iso: all
 	@cp -df $(MUSL_OUT_DIR)/lib/libwayland-client.so* $(USER_LIB_DIR)/
 	@cp -df $(MUSL_OUT_DIR)/lib/libxkbcommon.so* $(USER_LIB_DIR)/
 	@cp -df $(MUSL_OUT_DIR)/lib/libffi.so* $(USER_LIB_DIR)/
-	@cp -df $(BASE_DIR)/apps/wld/libwld.so* $(USER_LIB_DIR)/
 	@mkdir -p $(INITRD_TEMP)/lib
 	@if [ -d "$(USER_LIB_DIR)" ]; then \
 		cp -rv $(USER_LIB_DIR)/* $(INITRD_TEMP)/lib/ 2>/dev/null || true; \
@@ -127,11 +126,7 @@ iso: all
 	@if [ -d "/usr/share/X11/xkb" ]; then \
 		cp -r /usr/share/X11/xkb/* $(INITRD_TEMP)/usr/share/X11/xkb/; \
 	fi
-	@mkdir -p $(INITRD_TEMP)/usr/local/libexec/velox
-	@if [ -f "$(BASE_DIR)/apps/velox/clients/status_bar" ]; then \
-		cp -fv $(BASE_DIR)/apps/velox/clients/status_bar $(INITRD_TEMP)/usr/local/libexec/velox/status_bar; \
-	fi
-
+	
 	@cd $(INITRD_TEMP) && find . -mindepth 1 | cpio -o -H newc > $(INITRD_IMG)
 
 	@cp -v $(BIN_DIR)/$(OUTPUT) $(ISO_ROOT)/boot/

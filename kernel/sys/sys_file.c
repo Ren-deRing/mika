@@ -100,42 +100,60 @@ extern int64_t tty_write(const void *user_buf, size_t count);
 int64_t sys_write(int fd, const void *user_buf, size_t count) {
     if (fd < 0 || fd >= MAX_FILES) return -EBADF;
     if (count == 0) return 0;
-
     if (!is_user_address_range(user_buf, count)) return -EFAULT;
-
-    struct file *f = NULL;
-    if (fd >= 0 && fd < MAX_FILES) {
-        f = curproc->p_fd_table[fd];
-    }
-
-    if (f && f->f_vn && strcmp(f->f_vn->v_name, "fb0") == 0) {
-        size_t fb_size = g_boot_info.fb.pitch * g_boot_info.fb.height;
-        if (f->f_pos >= fb_size) return 0;
-        size_t actual_count = count;
-        if (f->f_pos + actual_count > fb_size) {
-            actual_count = fb_size - f->f_pos;
-        }
-        if (actual_count > 0) {
-            if (copy_from_user((char *)g_boot_info.fb.fb_addr + f->f_pos, user_buf, actual_count) < 0) {
-                return -EFAULT;
-            }
-            f->f_pos += actual_count;
-        }
-        return (int64_t)actual_count;
-    }
-
-    if (f && f->f_vn) {
-        if (strcmp(f->f_vn->v_name, "tty") == 0) {
-            return tty_write(user_buf, count);
-        }
-        return (int64_t)vfs_write(fd, user_buf, count);
-    }
 
     if (fd == 1 || fd == 2) {
         return tty_write(user_buf, count);
     }
 
-    return -EBADF;
+    uint64_t pflags = spin_lock_irqsave(&curproc->p_lock);
+    struct file *f = curproc->p_fd_table[fd];
+    if (!f) { spin_unlock_irqrestore(&curproc->p_lock, pflags); return -EBADF; }
+    const char *v_name = f->f_vn ? f->f_vn->v_name : "";
+    bool is_fb0 = (strcmp(v_name, "fb0") == 0);
+    bool is_tty = (strcmp(v_name, "tty") == 0);
+    file_ref(f);
+    spin_unlock_irqrestore(&curproc->p_lock, pflags);
+
+    if (is_fb0) {
+        size_t fb_size = g_boot_info.fb.pitch * g_boot_info.fb.height;
+
+        file_lock(f);
+        off_t pos = f->f_pos;
+        if (pos >= (off_t)fb_size) {
+            file_unlock(f);
+            file_close(f);
+            return 0;
+        }
+        size_t actual = count;
+        if ((off_t)(pos + actual) > (off_t)fb_size) {
+            actual = fb_size - pos;
+        }
+        file_unlock(f);
+
+        int64_t ret = 0;
+        if (actual > 0) {
+            if (copy_from_user((char *)g_boot_info.fb.fb_addr + pos, user_buf, actual) < 0) {
+                file_close(f);
+                return -EFAULT;
+            }
+            file_lock(f);
+            f->f_pos = pos + actual;
+            file_unlock(f);
+            ret = (int64_t)actual;
+        }
+
+        file_close(f);
+        return ret;
+    }
+
+    if (is_tty) {
+        file_close(f);
+        return tty_write(user_buf, count);
+    }
+
+    file_close(f);
+    return (int64_t)vfs_write(fd, user_buf, count);
 }
 
 int64_t sys_writev(int fd, const void *user_iov, int iovcnt) {
@@ -226,12 +244,16 @@ int64_t sys_open(const char *user_path, int flags, int mode) {
 int64_t sys_close(int fd) {
     if (fd < 0 || fd >= MAX_FILES) return -EBADF;
 
+    uint64_t flags = spin_lock_irqsave(&curproc->p_lock);
     struct file *f = curproc->p_fd_table[fd];
-    if (!f) return -EBADF;
-
+    if (!f) {
+        spin_unlock_irqrestore(&curproc->p_lock, flags);
+        return -EBADF;
+    }
     curproc->p_fd_table[fd] = NULL;
+    spin_unlock_irqrestore(&curproc->p_lock, flags);
 
-    file_close(f); 
+    file_close(f);
     return 0;
 }
 
@@ -248,26 +270,23 @@ int64_t sys_read(int fd, void *user_buf, size_t count) {
         return -EFAULT;
     }
 
+    uint64_t pflags = spin_lock_irqsave(&curproc->p_lock);
     struct file *f = curproc->p_fd_table[fd];
-    if (f && f->f_vn) {
-        if (strcmp(f->f_vn->v_name, "kbd") == 0 || strcmp(f->f_vn->v_name, "tty") == 0) {
-            return tty_read(user_buf, count);
-        }
-        if (strcmp(f->f_vn->v_name, "card0") == 0) {
-            return drm_read(f, user_buf, count);
-        }
+    if (!f) { spin_unlock_irqrestore(&curproc->p_lock, pflags); return -EBADF; }
+    const char *v_name = f->f_vn ? f->f_vn->v_name : "";
+    bool is_special = (strcmp(v_name, "kbd") == 0 || strcmp(v_name, "tty") == 0);
+    bool is_card0 = (strcmp(v_name, "card0") == 0);
+    spin_unlock_irqrestore(&curproc->p_lock, pflags);
+
+    if (is_special) {
+        return tty_read(user_buf, count);
+    }
+    if (is_card0) {
+        return drm_read(f, user_buf, count);
     }
 
     char kbuf[4096];
     size_t total = 0;
-
-    if (f && f->f_vn) {
-        dprintf("[sys_read] fd: %d (%s), buf: %p, count: %lu\n", fd, f->f_vn->v_name, user_buf, count);
-    } else {
-        dprintf("[sys_read] fd: %d (unknown), buf: %p, count: %lu\n", fd, user_buf, count);
-    }
-
-    bool is_gbm = (f && f->f_vn && strcmp(f->f_vn->v_name, "libgbm.so") == 0);
 
     while (total < count) {
         size_t to_copy = count - total;
@@ -315,16 +334,34 @@ int64_t sys_fstat(int fd, void *user_statbuf) {
     if (fd < 0 || fd >= MAX_FILES) return -EBADF;
     if (!is_user_address_range(user_statbuf, sizeof(struct stat))) return -EFAULT;
 
+    struct file *f = fdget(fd);
+    if (!f) {
+        if (fd == 0 || fd == 1 || fd == 2) {
+            struct stat kst;
+            memset(&kst, 0, sizeof(struct stat));
+            kst.st_mode = S_IFCHR | 0666;
+            kst.st_blksize = 1024;
+            kst.st_blocks = 0;
+            kst.st_size = 0;
+            kst.st_dev = 1;
+            kst.st_ino = fd + 1;
+            kst.st_rdev = (5 << 8) | 0;
+            if (copy_to_user(user_statbuf, &kst, sizeof(struct stat)) < 0) return -EFAULT;
+            return 0;
+        }
+        return -EBADF;
+    }
+
     struct stat kst;
     memset(&kst, 0, sizeof(struct stat));
 
-    struct file *f = curproc->p_fd_table[fd];
-    if (f && f->f_vn) {
+    if (f->f_vn) {
         struct vnode *vp = f->f_vn;
         if (vp->ops && vp->ops->getattr) {
             int r = vp->ops->getattr(vp, &kst);
             if (r < 0) {
                 dprintf("[sys_fstat] getattr failed for fd %d: %d\n", fd, r);
+                fdput(f);
                 return r;
             }
         } else {
@@ -344,19 +381,9 @@ int64_t sys_fstat(int fd, void *user_statbuf) {
         kst.st_blocks = (kst.st_size + 511) / 512;
         fill_rdev(vp, &kst);
         dprintf("[sys_fstat] fd: %d (%s), mode: 0x%x, size: %ld, blksize: %ld, dev: %ld, ino: %ld, rdev: %ld\n", fd, vp->v_name, kst.st_mode, kst.st_size, kst.st_blksize, kst.st_dev, kst.st_ino, kst.st_rdev);
-    } else if (fd == 0 || fd == 1 || fd == 2) {
-        kst.st_mode = S_IFCHR | 0666; 
-        kst.st_blksize = 1024;
-        kst.st_blocks = 0;
-        kst.st_size = 0;
-        kst.st_dev = 1;
-        kst.st_ino = fd + 1;
-        kst.st_rdev = (5 << 8) | 0;
-        dprintf("[sys_fstat] fd: %d (fallback), mode: 0x%x, size: %ld, blksize: %ld, dev: %ld, ino: %ld, rdev: %ld\n", fd, kst.st_mode, kst.st_size, kst.st_blksize, kst.st_dev, kst.st_ino, kst.st_rdev);
-    } else {
-        dprintf("[sys_fstat] fd: %d (invalid/closed)\n", fd);
-        return -EBADF;
     }
+
+    fdput(f);
 
     if (copy_to_user(user_statbuf, &kst, sizeof(struct stat)) < 0) {
         return -EFAULT;
@@ -547,8 +574,9 @@ int64_t sys_symlink(const char *user_target, const char *user_linkpath) {
 int64_t sys_flock(int fd, int operation) {
     (void)operation;
     if (fd < 0 || fd >= MAX_FILES) return -EBADF;
-    struct file *f = curproc->p_fd_table[fd];
+    struct file *f = fdget(fd);
     if (!f) return -EBADF;
+    fdput(f);
     return 0;
 }
 
@@ -571,201 +599,194 @@ int64_t sys_ioctl(int fd, uint64_t request_raw, void *arg) {
 
 int64_t sys_ioctl_impl(int fd, uint64_t request_raw, void *arg) {
     uint32_t request = (uint32_t)request_raw;
-    if (fd >= 0 && fd < MAX_FILES) {
-        struct file *f = curproc->p_fd_table[fd];
-        if (f && f->f_vn) {
-            dprintf("[KERNEL sys_ioctl] fd=%d, name='%s', request=0x%x (raw=0x%lx), arg=%p\n", fd, f->f_vn->v_name, request, request_raw, arg);
-            if (f->f_vn->ops->ioctl) {
-                return f->f_vn->ops->ioctl(f->f_vn, (uint64_t)request, arg);
+    int64_t ret = -ENOTTY;
+
+    struct file *f = fdget(fd);
+    if (!f) {
+        if (fd == 0 || fd == 1 || fd == 2) {
+            if (request == 0x5401) {
+                struct our_termios term = {0};
+                term.c_iflag = 0x0500;
+                term.c_oflag = 0x0005;
+                term.c_cflag = 0x0BF0;
+                term.c_lflag = 0x8A3B;
+                if (copy_to_user(arg, &term, sizeof(term)) < 0) return -EFAULT;
+                return 0;
             }
-            if (strcmp(f->f_vn->v_name, "fb0") == 0) {
-                if (request == 0x4601) { // FBIOGET_INFO
-                    struct {
-                        uint32_t width;
-                        uint32_t height;
-                        uint32_t pitch;
-                        uint32_t bpp;
-                    } info = {
-                        g_boot_info.fb.width,
-                        g_boot_info.fb.height,
-                        g_boot_info.fb.pitch,
-                        g_boot_info.fb.bpp
-                    };
-                    if (!is_user_address_range(arg, sizeof(info))) return -EFAULT;
-                    if (copy_to_user(arg, &info, sizeof(info)) < 0) return -EFAULT;
-                    return 0;
-                }
-                else if (request == FBIOGET_VSCREENINFO) {
-                    struct our_fb_var_screeninfo fb_var = {0};
-                    fb_var.xres = g_boot_info.fb.width;
-                    fb_var.yres = g_boot_info.fb.height;
-                    fb_var.xres_virtual = g_boot_info.fb.width;
-                    fb_var.yres_virtual = g_boot_info.fb.height;
-                    fb_var.bits_per_pixel = g_boot_info.fb.bpp;
-                    if (g_boot_info.fb.bpp == 32) {
-                        fb_var.red.offset = 16;
-                        fb_var.red.length = 8;
-                        fb_var.green.offset = 8;
-                        fb_var.green.length = 8;
-                        fb_var.blue.offset = 0;
-                        fb_var.blue.length = 8;
-                        fb_var.transp.offset = 24;
-                        fb_var.transp.length = 8;
-                    } else if (g_boot_info.fb.bpp == 16) {
-                        fb_var.red.offset = 11;
-                        fb_var.red.length = 5;
-                        fb_var.green.offset = 5;
-                        fb_var.green.length = 6;
-                        fb_var.blue.offset = 0;
-                        fb_var.blue.length = 5;
-                    }
-                    if (!is_user_address_range(arg, sizeof(fb_var))) return -EFAULT;
-                    if (copy_to_user(arg, &fb_var, sizeof(fb_var)) < 0) return -EFAULT;
-                    return 0;
-                }
-                else if (request == FBIOGET_FSCREENINFO) {
-                    struct our_fb_fix_screeninfo fb_fix = {0};
-                    strcpy(fb_fix.id, "Doppio FB");
-                    fb_fix.smem_start = (unsigned long)g_boot_info.fb.fb_addr;
-                    fb_fix.smem_len = g_boot_info.fb.pitch * g_boot_info.fb.height;
-                    fb_fix.type = 0; // FB_TYPE_PACKED_PIXELS
-                    fb_fix.visual = 2; // FB_VISUAL_TRUECOLOR
-                    fb_fix.line_length = g_boot_info.fb.pitch;
-                    if (!is_user_address_range(arg, sizeof(fb_fix))) return -EFAULT;
-                    if (copy_to_user(arg, &fb_fix, sizeof(fb_fix)) < 0) return -EFAULT;
-                }
+            if (request == 0x5402 || request == 0x5403 || request == 0x5404) return 0;
+            if (request == 0x5413) {
+                unsigned short fake_winsize[4] = { 25, 80, 0, 0 };
+                if (copy_to_user(arg, fake_winsize, 8) < 0) return -EFAULT;
+                return 0;
             }
-            else if (strcmp(f->f_vn->v_name, "card0") == 0) {
-                return drm_ioctl(f, request, arg);
+        }
+        return -EBADF;
+    }
+
+    if (f->f_vn) {
+        dprintf("[KERNEL sys_ioctl] fd=%d, name='%s', request=0x%x (raw=0x%lx), arg=%p\n", fd, f->f_vn->v_name, request, request_raw, arg);
+        if (f->f_vn->ops->ioctl) {
+            ret = f->f_vn->ops->ioctl(f->f_vn, (uint64_t)request, arg);
+            goto out;
+        }
+
+        if (strcmp(f->f_vn->v_name, "fb0") == 0) {
+            if (request == 0x4601) {
+                struct {
+                    uint32_t width, height, pitch, bpp;
+                } info = {
+                    g_boot_info.fb.width, g_boot_info.fb.height,
+                    g_boot_info.fb.pitch, g_boot_info.fb.bpp
+                };
+                if (!is_user_address_range(arg, sizeof(info))) { ret = -EFAULT; goto out; }
+                if (copy_to_user(arg, &info, sizeof(info)) < 0) { ret = -EFAULT; goto out; }
+                ret = 0; goto out;
             }
-            else if (strcmp(f->f_vn->v_name, "kbd") == 0 || strcmp(f->f_vn->v_name, "tty") == 0) {
-                if (request == 0x4B33) { // KDGKBTYPE
-                    int val = 0x02; // KB_101
-                    if (!is_user_address_range(arg, sizeof(int))) return -EFAULT;
-                    if (copy_to_user(arg, &val, sizeof(int)) < 0) return -EFAULT;
-                    return 0;
+            else if (request == FBIOGET_VSCREENINFO) {
+                struct our_fb_var_screeninfo fb_var = {0};
+                fb_var.xres = g_boot_info.fb.width;
+                fb_var.yres = g_boot_info.fb.height;
+                fb_var.xres_virtual = g_boot_info.fb.width;
+                fb_var.yres_virtual = g_boot_info.fb.height;
+                fb_var.bits_per_pixel = g_boot_info.fb.bpp;
+                if (g_boot_info.fb.bpp == 32) {
+                    fb_var.red.offset = 16;    fb_var.red.length = 8;
+                    fb_var.green.offset = 8;   fb_var.green.length = 8;
+                    fb_var.blue.offset = 0;    fb_var.blue.length = 8;
+                    fb_var.transp.offset = 24; fb_var.transp.length = 8;
+                } else if (g_boot_info.fb.bpp == 16) {
+                    fb_var.red.offset = 11;    fb_var.red.length = 5;
+                    fb_var.green.offset = 5;   fb_var.green.length = 6;
+                    fb_var.blue.offset = 0;    fb_var.blue.length = 5;
                 }
-                else if (request == 0x4B44) { // KDGKBMODE
-                    int val = 0x01; // K_XLATE
-                    if (!is_user_address_range(arg, sizeof(int))) return -EFAULT;
-                    if (copy_to_user(arg, &val, sizeof(int)) < 0) return -EFAULT;
-                    return 0;
-                }
-                else if (request == 0x4B45) { // KDSKBMODE
-                    return 0;
-                }
-                else if (request == 0x5401) { // TCGETS
-                    struct our_termios term = {0};
-                    term.c_iflag = 0x0500; // ICRNL | IXON
-                    term.c_oflag = 0x0005; // OPOST | ONLCR
-                    term.c_cflag = 0x0BF0; // B9600 | CS8 | CREAD | HUPCL
-                    term.c_lflag = 0x8A3B; // ISIG | ICANON | ECHO | ECHOE | ECHOK | IEXTEN
-                    if (!is_user_address_range(arg, sizeof(term))) return -EFAULT;
-                    if (copy_to_user(arg, &term, sizeof(term)) < 0) return -EFAULT;
-                    return 0;
-                }
-                else if (request == 0x5402 || request == 0x5403 || request == 0x5404) { // TCSETS / W / F
-                    return 0;
-                }
-                else if (request == 0x5603) { // VT_GETSTATE
-                    struct {
-                        unsigned short v_active;
-                        unsigned short v_signal;
-                        unsigned short v_state;
-                    } state = {0};
-                    state.v_active = 1;
-                    state.v_state = 1;
-                    if (!is_user_address_range(arg, sizeof(state))) return -EFAULT;
-                    if (copy_to_user(arg, &state, sizeof(state)) < 0) return -EFAULT;
-                    return 0;
-                }
-                else if (request == 0x5601) { // VT_GETMODE
-                    struct {
-                        char mode;
-                        char waitv;
-                        short relsig;
-                        char acqsig;
-                        char frsig;
-                    } mode = {0};
-                    mode.mode = 0;
-                    if (!is_user_address_range(arg, sizeof(mode))) return -EFAULT;
-                    if (copy_to_user(arg, &mode, sizeof(mode)) < 0) return -EFAULT;
-                    return 0;
-                }
-                else if (request == 0x5602 || request == 0x5605 || request == 0x5606 || request == 0x5607) { // VT_SETMODE / VT_RELDISP / VT_ACTIVATE / VT_WAITACTIVE
-                    return 0;
-                }
-                else if (request == 0x4B3A) { // KDSETMODE
-                    return 0;
-                }
-                else if (request == 0x4B3B) { // KDGETMODE
-                    int val = 0;
-                    if (!is_user_address_range(arg, sizeof(int))) return -EFAULT;
-                    if (copy_to_user(arg, &val, sizeof(int)) < 0) return -EFAULT;
-                    return 0;
-                }
+                if (!is_user_address_range(arg, sizeof(fb_var))) { ret = -EFAULT; goto out; }
+                if (copy_to_user(arg, &fb_var, sizeof(fb_var)) < 0) { ret = -EFAULT; goto out; }
+                ret = 0; goto out;
+            }
+            else if (request == FBIOGET_FSCREENINFO) {
+                struct our_fb_fix_screeninfo fb_fix = {0};
+                strcpy(fb_fix.id, "Doppio FB");
+                fb_fix.smem_start = (unsigned long)g_boot_info.fb.fb_addr;
+                fb_fix.smem_len = g_boot_info.fb.pitch * g_boot_info.fb.height;
+                fb_fix.type = 0;
+                fb_fix.visual = 2;
+                fb_fix.line_length = g_boot_info.fb.pitch;
+                if (!is_user_address_range(arg, sizeof(fb_fix))) { ret = -EFAULT; goto out; }
+                if (copy_to_user(arg, &fb_fix, sizeof(fb_fix)) < 0) { ret = -EFAULT; goto out; }
+                ret = 0; goto out;
+            }
+        }
+        else if (strcmp(f->f_vn->v_name, "card0") == 0) {
+            ret = drm_ioctl(f, request, arg);
+            goto out;
+        }
+        else if (strcmp(f->f_vn->v_name, "kbd") == 0 || strcmp(f->f_vn->v_name, "tty") == 0) {
+            if (request == 0x4B33) {
+                int val = 0x02;
+                if (!is_user_address_range(arg, sizeof(int))) { ret = -EFAULT; goto out; }
+                if (copy_to_user(arg, &val, sizeof(int)) < 0) { ret = -EFAULT; goto out; }
+                ret = 0; goto out;
+            }
+            else if (request == 0x4B44) {
+                int val = 0x01;
+                if (!is_user_address_range(arg, sizeof(int))) { ret = -EFAULT; goto out; }
+                if (copy_to_user(arg, &val, sizeof(int)) < 0) { ret = -EFAULT; goto out; }
+                ret = 0; goto out;
+            }
+            else if (request == 0x4B45) { ret = 0; goto out; }
+            else if (request == 0x5401) {
+                struct our_termios term = {0};
+                term.c_iflag = 0x0500; term.c_oflag = 0x0005;
+                term.c_cflag = 0x0BF0; term.c_lflag = 0x8A3B;
+                if (!is_user_address_range(arg, sizeof(term))) { ret = -EFAULT; goto out; }
+                if (copy_to_user(arg, &term, sizeof(term)) < 0) { ret = -EFAULT; goto out; }
+                ret = 0; goto out;
+            }
+            else if (request == 0x5402 || request == 0x5403 || request == 0x5404) { ret = 0; goto out; }
+            else if (request == 0x5603) {
+                struct { unsigned short v_active, v_signal, v_state; } state = {0};
+                state.v_active = 1; state.v_state = 1;
+                if (!is_user_address_range(arg, sizeof(state))) { ret = -EFAULT; goto out; }
+                if (copy_to_user(arg, &state, sizeof(state)) < 0) { ret = -EFAULT; goto out; }
+                ret = 0; goto out;
+            }
+            else if (request == 0x5601) {
+                struct { char mode, waitv; short relsig; char acqsig, frsig; } mode = {0};
+                if (!is_user_address_range(arg, sizeof(mode))) { ret = -EFAULT; goto out; }
+                if (copy_to_user(arg, &mode, sizeof(mode)) < 0) { ret = -EFAULT; goto out; }
+                ret = 0; goto out;
+            }
+            else if (request == 0x5602 || request == 0x5605 || request == 0x5606 || request == 0x5607) { ret = 0; goto out; }
+            else if (request == 0x4B3A) { ret = 0; goto out; }
+            else if (request == 0x4B3B) {
+                int val = 0;
+                if (!is_user_address_range(arg, sizeof(int))) { ret = -EFAULT; goto out; }
+                if (copy_to_user(arg, &val, sizeof(int)) < 0) { ret = -EFAULT; goto out; }
+                ret = 0; goto out;
             }
         }
     }
 
     if (request == 0x5413) {
         if (!is_user_address_range(arg, 8)) {
-            return -EFAULT;
+            ret = -EFAULT;
+            goto out;
         }
-
         unsigned short fake_winsize[4] = { 25, 80, 0, 0 };
-
         if (copy_to_user(arg, fake_winsize, 8) < 0) {
-            return -EFAULT;
+            ret = -EFAULT;
+            goto out;
         }
-
-        return 0;
+        ret = 0;
+        goto out;
     }
 
-    return -ENOTTY;
+out:
+    fdput(f);
+    return ret;
 }
 
 int64_t sys_fcntl(int fd, int cmd, uint64_t arg) {
     if (fd < 0 || fd >= MAX_FILES) return -EBADF;
 
-    struct file *f = curproc->p_fd_table[fd];
+    struct file *f = fdget(fd);
     if (!f) return -EBADF;
 
-    if (cmd == 0 || cmd == 1030) { // F_DUPFD or F_DUPFD_CLOEXEC
+    if (cmd == 0 || cmd == 1030) {
         int minfd = (int)arg;
-        if (minfd < 0 || minfd >= MAX_FILES) return -EINVAL;
+        if (minfd < 0 || minfd >= MAX_FILES) { fdput(f); return -EINVAL; }
 
-        spin_lock(&curproc->p_lock);
+        uint64_t pflags = spin_lock_irqsave(&curproc->p_lock);
         int newfd = -1;
         for (int i = minfd; i < MAX_FILES; i++) {
             if (curproc->p_fd_table[i] == NULL) {
                 curproc->p_fd_table[i] = f;
-                f->f_refcnt++;
+                __atomic_fetch_add(&f->f_refcnt, 1, __ATOMIC_SEQ_CST);
                 newfd = i;
                 break;
             }
         }
-        spin_unlock(&curproc->p_lock);
+        spin_unlock_irqrestore(&curproc->p_lock, pflags);
 
+        fdput(f);
         if (newfd == -1) return -EMFILE;
         return (int64_t)newfd;
     }
 
-    if (cmd == 3) { // F_GETFL
-        return (int64_t)f->f_flags;
-    }
-    if (cmd == 4) { // F_SETFL
+    int64_t ret = 0;
+
+    if (cmd == 3) {
+        file_lock(f);
+        ret = (int64_t)f->f_flags;
+        file_unlock(f);
+    } else if (cmd == 4) {
+        file_lock(f);
         f->f_flags = (f->f_flags & ~0xFFFFFFF) | (arg & 0xFFFFFFF);
-        return 0;
-    }
-    if (cmd == 1) { // F_GETFD
-        return 0;
-    }
-    if (cmd == 2) { // F_SETFD
-        return 0;
+        file_unlock(f);
     }
 
-    return 0;
+    fdput(f);
+    return ret;
 }
 
 int64_t sys_mkdir(const char *user_path, int mode) {

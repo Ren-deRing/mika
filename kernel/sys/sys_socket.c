@@ -947,19 +947,35 @@ int64_t sys_poll(void *user_fds, uint64_t nfds, int timeout) {
 
 int64_t sys_ftruncate(int fd, int64_t length) {
     if (fd < 0 || fd >= MAX_FILES) return -EBADF;
-    struct file *f = curproc->p_fd_table[fd];
-    if (!f || !f->f_vn) return -EBADF;
-
     if (length < 0) return -EINVAL;
-    
-    if (f->f_vn->ops->setattr) {
+
+    struct file *f = NULL;
+    struct vnode *mapped_vn = NULL;
+
+    uint64_t proc_flags = spin_lock_irqsave(&curproc->p_lock);
+    f = curproc->p_fd_table[fd];
+    if (f && f->f_vn) {
+        mapped_vn = f->f_vn;
+        vref(mapped_vn);
+    }
+    spin_unlock_irqrestore(&curproc->p_lock, proc_flags);
+
+    if (!mapped_vn) return -EBADF;
+
+    int64_t ret = 0;
+
+    if (mapped_vn->ops && mapped_vn->ops->setattr) {
         struct stat st;
         memset(&st, 0, sizeof(st));
         st.st_size = length;
-        return f->f_vn->ops->setattr(f->f_vn, &st);
+        ret = mapped_vn->ops->setattr(mapped_vn, &st);
+    } else {
+        ret = -EINVAL;
     }
+
+    vput(mapped_vn);
     
-    return 0;
+    return ret;
 }
 
 

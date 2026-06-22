@@ -28,16 +28,18 @@ struct vnode_ops {
 };
 
 struct vnode {
+    rwlock_t          rwlock;       /* data 보호 */
+    mutex_t           io_mutex;     /* file I/O mutex (read/write) */
     uint32_t          ref_count;
     uint32_t          type;
     struct vnode_ops *ops;
     struct mount     *mnt;
     void             *data;
-    spinlock_t        lock;
+    spinlock_t        lock;         /* 메타데이터용 (v_reclaimable etc) */
 
     struct list_node  v_all;
     struct list_node  v_freelist;
-    struct list_node v_hash;
+    struct list_node  v_hash;
 
     struct vnode *v_parent;
     char v_name[32];

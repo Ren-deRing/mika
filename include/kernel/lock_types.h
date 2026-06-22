@@ -17,3 +17,7 @@ typedef struct {
     struct thread *owner;
     struct list_node wait_queue;
 } mutex_t;
+
+typedef struct {
+    volatile uint32_t val;
+} rwlock_t;
