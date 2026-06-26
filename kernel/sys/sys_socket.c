@@ -17,12 +17,12 @@
 extern struct vnode_ops pipe_ops;
 #define PIPE_BUF_SIZE 4096
 struct pipe_buffer {
+    char       buf[PIPE_BUF_SIZE];
+    size_t     head;
+    size_t     tail;
+    size_t     size;
     spinlock_t lock;
-    char  buf[PIPE_BUF_SIZE];
-    int   head;
-    int   tail;
-    int   size;
-    int   refcnt;
+    int        refcnt;
 };
 
 #define AF_UNIX 1
@@ -119,7 +119,7 @@ static int netlink_sock_close(struct vnode *vp) {
 struct vnode_ops netlink_socket_ops = {
     .read = netlink_sock_read,
     .write = netlink_sock_write,
-    .close = netlink_sock_close,
+    .inactive = netlink_sock_close,
 };
 
 int64_t sys_setsockopt(int fd, int level, int optname, const void *optval, uint32_t optlen) {
@@ -153,7 +153,7 @@ static int sock_close(struct vnode *vp);
 struct vnode_ops unix_socket_ops = {
     .read = sock_read,
     .write = sock_write,
-    .close = sock_close,
+    .inactive = sock_close,
 };
 
 
@@ -683,24 +683,38 @@ int64_t sys_sendmsg(int fd, const void *user_msg, int flags) {
                 int fds_cnt = (cmsg.cmsg_len - sizeof(struct cmsghdr)) / sizeof(int);
                 int *user_fds_buf = (int *)((char *)msg.msg_control + sizeof(struct cmsghdr));
                 
-                spin_lock(&peer->lock);
-                for (int i = 0; i < fds_cnt && i < UNIX_SOCKET_MAX_PASSED_FDS; i++) {
+                int local_fds[64];
+                int local_n = 0;
+                for (int i = 0; i < fds_cnt && i < 64; i++) {
                     int passed_fd;
                     if (copy_from_user(&passed_fd, &user_fds_buf[i], sizeof(int)) == 0) {
-                        if (passed_fd >= 0 && passed_fd < MAX_FILES) {
-                            uint64_t _pflags = spin_lock_irqsave(&curproc->p_lock);
-                            struct file *pf = curproc->p_fd_table[passed_fd];
-                            if (pf) __atomic_fetch_add(&pf->f_refcnt, 1, __ATOMIC_SEQ_CST);
-                            spin_unlock_irqrestore(&curproc->p_lock, _pflags);
-                            if (pf) {
-                                uint32_t next_passed_tail = (peer->passed_tail + 1) % UNIX_SOCKET_MAX_PASSED_FDS;
-                                if (next_passed_tail != (uint32_t)peer->passed_head) {
-                                    peer->passed_files[peer->passed_tail] = pf;
-                                    peer->passed_tail = next_passed_tail;
-                                } else {
-                                    file_close(pf); 
-                                }
-                            }
+                        local_fds[local_n++] = passed_fd;
+                    }
+                }
+
+                struct file *local_files[64];
+                int local_nf = 0;
+                for (int i = 0; i < local_n; i++) {
+                    int passed_fd = local_fds[i];
+                    if (passed_fd >= 0 && passed_fd < MAX_FILES) {
+                        uint64_t _pflags = spin_lock_irqsave(&curproc->p_lock);
+                        struct file *pf = curproc->p_fd_table[passed_fd];
+                        if (pf) __atomic_fetch_add(&pf->f_refcnt, 1, __ATOMIC_SEQ_CST);
+                        spin_unlock_irqrestore(&curproc->p_lock, _pflags);
+                        local_files[local_nf++] = pf;
+                    }
+                }
+
+                spin_lock(&peer->lock);
+                for (int i = 0; i < local_nf; i++) {
+                    struct file *pf = local_files[i];
+                    if (pf) {
+                        uint32_t next_passed_tail = (peer->passed_tail + 1) % UNIX_SOCKET_MAX_PASSED_FDS;
+                        if (next_passed_tail != (uint32_t)peer->passed_head) {
+                            peer->passed_files[peer->passed_tail] = pf;
+                            peer->passed_tail = next_passed_tail;
+                        } else {
+                            file_close(pf); 
                         }
                     }
                 }
@@ -717,34 +731,37 @@ int64_t sys_sendmsg(int fd, const void *user_msg, int flags) {
             if (copy_from_user(&iov, &msg.msg_iov[i], sizeof(struct iovec)) < 0) { ret = -EFAULT; goto out; }
             if (iov.iov_len == 0) continue;
 
-            spin_lock(&peer->lock);
             size_t written = 0;
             while (written < iov.iov_len) {
-                uint32_t next_tail = (peer->buf_tail + 1) % UNIX_SOCKET_BUF_SIZE;
-                if (next_tail == peer->buf_head) {
-                    spin_unlock(&peer->lock);
-                    thread_yield();
-                    spin_lock(&peer->lock);
+                char b;
+                if (copy_from_user(&b, (char *)iov.iov_base + written, 1) < 0) {
+                    ret = total_written > 0 ? (int64_t)total_written : -EFAULT;
+                    goto out;
+                }
+
+                spin_lock(&peer->lock);
+
+                while (1) {
                     if (peer->state != SS_CONNECTED) {
                         spin_unlock(&peer->lock);
                         ret = total_written > 0 ? (int64_t)total_written : -EPIPE;
                         goto out;
                     }
-                    continue;
-                }
-
-                char b;
-                if (copy_from_user(&b, (char *)iov.iov_base + written, 1) < 0) {
+                    uint32_t next_tail = (peer->buf_tail + 1) % UNIX_SOCKET_BUF_SIZE;
+                    if (next_tail != peer->buf_head)
+                        break;
                     spin_unlock(&peer->lock);
-                    ret = -EFAULT; goto out;
+                    thread_yield();
+                    spin_lock(&peer->lock);
                 }
 
+                uint32_t next_tail = (peer->buf_tail + 1) % UNIX_SOCKET_BUF_SIZE;
                 peer->buf[peer->buf_tail] = b;
                 peer->buf_tail = next_tail;
                 written++;
                 total_written++;
+                spin_unlock(&peer->lock);
             }
-            spin_unlock(&peer->lock);
         }
     }
 
@@ -812,29 +829,41 @@ int64_t sys_recvmsg(int fd, void *user_msg, int flags) {
     }
 
     if (total_read > 0 && msg.msg_control && msg.msg_controllen >= sizeof(struct cmsghdr)) {
+        struct file *extracted_files[64];
+        int extracted_cnt = 0;
+        int max_to_pass = (msg.msg_controllen - sizeof(struct cmsghdr)) / sizeof(int);
+        if (max_to_pass > (int)total_read) max_to_pass = (int)total_read;
+        if (max_to_pass > 64) max_to_pass = 64;
+
         spin_lock(&s->lock);
-        if (s->passed_head != s->passed_tail) {
+        while (s->passed_head != s->passed_tail && extracted_cnt < max_to_pass) {
+            struct file *pf = s->passed_files[s->passed_head];
+            s->passed_files[s->passed_head] = NULL;
+            s->passed_head = (s->passed_head + 1) % UNIX_SOCKET_MAX_PASSED_FDS;
+            extracted_files[extracted_cnt++] = pf;
+        }
+        spin_unlock(&s->lock);
+
+        if (extracted_cnt > 0) {
             struct cmsghdr cmsg;
             cmsg.cmsg_level = SOL_SOCKET;
             cmsg.cmsg_type = SCM_RIGHTS;
 
             int passed_cnt = 0;
-            int max_to_pass = (msg.msg_controllen - sizeof(struct cmsghdr)) / sizeof(int);
-            if (max_to_pass > (int)total_read) max_to_pass = (int)total_read;
             int *user_fds_buf = (int *)((char *)msg.msg_control + sizeof(struct cmsghdr));
+            int new_fds[64];
 
-            while (s->passed_head != s->passed_tail && passed_cnt < max_to_pass) {
-                struct file *pf = s->passed_files[s->passed_head];
-                s->passed_files[s->passed_head] = NULL;
-                s->passed_head = (s->passed_head + 1) % UNIX_SOCKET_MAX_PASSED_FDS;
-
-                int new_fd = proc_alloc_fd(curproc, pf);
+            for (int i = 0; i < extracted_cnt; i++) {
+                int new_fd = proc_alloc_fd(curproc, extracted_files[i]);
                 if (new_fd >= 0) {
-                    copy_to_user(&user_fds_buf[passed_cnt], &new_fd, sizeof(int));
-                    passed_cnt++;
+                    new_fds[passed_cnt++] = new_fd;
                 } else {
-                    file_close(pf);
+                    file_close(extracted_files[i]);
                 }
+            }
+
+            for (int i = 0; i < passed_cnt; i++) {
+                copy_to_user(&user_fds_buf[i], &new_fds[i], sizeof(int));
             }
 
             cmsg.cmsg_len = sizeof(struct cmsghdr) + passed_cnt * sizeof(int);
@@ -842,7 +871,6 @@ int64_t sys_recvmsg(int fd, void *user_msg, int flags) {
             msg.msg_controllen = cmsg.cmsg_len;
             copy_to_user(user_msg, &msg, sizeof(struct msghdr));
         }
-        spin_unlock(&s->lock);
     }
 
     ret = (int64_t)total_read;
@@ -905,8 +933,8 @@ static void poll_check_fd(struct pollfd *fds, int i) {
 }
 
 static int do_poll(struct pollfd *fds, int nfds, int timeout_ms) {
-    int timeout_ticks = 0;
     int ready_count = 0;
+    uint64_t deadline_ticks = (timeout_ms > 0) ? arch_get_system_ticks() + timeout_ms : 0;
     while (1) {
         ready_count = 0;
         for (int i = 0; i < nfds; i++) {
@@ -917,10 +945,7 @@ static int do_poll(struct pollfd *fds, int nfds, int timeout_ms) {
         }
         if (ready_count > 0 || timeout_ms == 0) break;
         thread_yield();
-        if (timeout_ms > 0) {
-            timeout_ticks++;
-            if (timeout_ticks > timeout_ms * 10) break;
-        }
+        if (timeout_ms > 0 && arch_get_system_ticks() >= deadline_ticks) break;
     }
     return ready_count;
 }

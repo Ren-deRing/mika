@@ -17,27 +17,6 @@
 
 bool ap_release = false;
 
-static void do_early_initcalls(void) {
-    for (initcall_t* call = __early_initcall_start; call < __early_initcall_end; call++) {
-        if (!call || !*call) continue;
-        (*call)();
-    }
-}
-
-static void do_late_initcalls(void) {
-    for (initcall_t* call = __late_initcall_start; call < __late_initcall_end; call++) {
-        if (!call || !*call) continue;
-        (*call)();
-    }
-}
-
-void do_ap_initcalls(void) {
-    for (initcall_t* call = __ap_initcall_start; call < __ap_initcall_end; call++) {
-        if (!call || !*call) continue;
-        (*call)();
-    }
-}
-
 void generic_main(void) {
    do_late_initcalls();
 

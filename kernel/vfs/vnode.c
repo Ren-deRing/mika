@@ -48,10 +48,6 @@ struct vnode* vnode_alloc(uint32_t type, struct vnode_ops *ops) {
         spin_unlock_irqrestore(&vnode_list_lock, flags);
         vn = kmalloc(sizeof(struct vnode));
         if (!vn) return NULL;
-
-        spin_lock_irqsave(&vnode_list_lock);
-        list_add(&vn->v_all, &vnode_all_list);
-        spin_unlock_irqrestore(&vnode_list_lock, flags);
     } else {
         spin_unlock_irqrestore(&vnode_list_lock, flags);
     }
@@ -60,15 +56,15 @@ struct vnode* vnode_alloc(uint32_t type, struct vnode_ops *ops) {
     vn->ref_count = 1;
     vn->type = type;
     vn->ops = ops;
-    vn->data = NULL;
-    vn->mnt = NULL;
-    vn->v_parent = NULL;
     vn->v_reclaimable = 0;
-    memset(vn->v_name, 0, sizeof(vn->v_name));
 
     rwlock_init(&vn->rwlock);
     mutex_init(&vn->io_mutex);
     spin_lock_init(&vn->lock);
+
+    flags = spin_lock_irqsave(&vnode_list_lock);
+    list_add(&vn->v_all, &vnode_all_list);
+    spin_unlock_irqrestore(&vnode_list_lock, flags);
 
     return vn;
 }

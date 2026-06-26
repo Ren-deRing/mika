@@ -112,12 +112,12 @@ iso: all
 	@mkdir -p $(USER_LIB_DIR)
 	@cp -f $(MUSL_OUT_DIR)/lib/libc.so $(USER_LIB_DIR)/libc.so
 	@cp -f $(MUSL_OUT_DIR)/lib/libc.so $(USER_LIB_DIR)/ld-musl-x86_64.so.1
-	@cp -df $(MUSL_OUT_DIR)/lib/libpixman-1.so* $(USER_LIB_DIR)/
-	@cp -df $(MUSL_OUT_DIR)/lib/libdrm.so* $(USER_LIB_DIR)/
-	@cp -df $(MUSL_OUT_DIR)/lib/libwayland-server.so* $(USER_LIB_DIR)/
-	@cp -df $(MUSL_OUT_DIR)/lib/libwayland-client.so* $(USER_LIB_DIR)/
-	@cp -df $(MUSL_OUT_DIR)/lib/libxkbcommon.so* $(USER_LIB_DIR)/
-	@cp -df $(MUSL_OUT_DIR)/lib/libffi.so* $(USER_LIB_DIR)/
+# 	@cp -df $(MUSL_OUT_DIR)/lib/libpixman-1.so* $(USER_LIB_DIR)/
+# 	@cp -df $(MUSL_OUT_DIR)/lib/libdrm.so* $(USER_LIB_DIR)/
+# 	@cp -df $(MUSL_OUT_DIR)/lib/libwayland-server.so* $(USER_LIB_DIR)/
+# 	@cp -df $(MUSL_OUT_DIR)/lib/libwayland-client.so* $(USER_LIB_DIR)/
+# 	@cp -df $(MUSL_OUT_DIR)/lib/libxkbcommon.so* $(USER_LIB_DIR)/
+# 	@cp -df $(MUSL_OUT_DIR)/lib/libffi.so* $(USER_LIB_DIR)/
 	@mkdir -p $(INITRD_TEMP)/lib
 	@if [ -d "$(USER_LIB_DIR)" ]; then \
 		cp -rv $(USER_LIB_DIR)/* $(INITRD_TEMP)/lib/ 2>/dev/null || true; \

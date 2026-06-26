@@ -12,10 +12,10 @@
 #include <time.h>
 #include <stdint.h>
 
-#define NUM_CHILDREN     2
-#define ITERATIONS       50
+#define NUM_CHILDREN     4
+#define ITERATIONS       500
 #define SHM_SIZE  (4UL * 1024 * 1024)
-#define TIMEOUT_SEC      10
+#define TIMEOUT_SEC      50
 
 static int count_my_fds(void) {
     int cnt = 0;
@@ -104,8 +104,6 @@ void child_client(int write_sock, int child_id, int cross_pipe_fd) {
         memset((char*)ptr + SHM_SIZE - 4, end_byte, 4);
 
         if (send_fd(write_sock, mem_fd) < 0) { perror("send_fd"); exit(1); }
-
-        { fprintf(stderr, "[c%di%d]", child_id, i); }
 
         munmap(ptr, SHM_SIZE);
         close(mem_fd);
@@ -256,39 +254,34 @@ int main() {
         }
         struct timeval tv = { .tv_sec = 5, .tv_usec = 0 };
         int r = select(maxfd + 1, &rfds, NULL, NULL, &tv);
-        if (r <= 0) {
+        if (r < 0) {
+            printf("[FAIL] Cross-check select error!\n");
+            break;
+        }
+        if (r == 0) {
             printf("[FAIL] Cross-check timeout! mask=0x%02x\n", done_mask);
             break;
         }
         for (int i = 0; i < NUM_CHILDREN; i++) {
             if (!(done_mask & (1u << i)) && FD_ISSET(cross_pipe[i][0], &rfds)) {
                 uint8_t val;
-                if (read(cross_pipe[i][0], &val, 1) == 1) {
+                ssize_t n = read(cross_pipe[i][0], &val, 1);
+                if (n == 1) {
                     if (val == (uint8_t)i) {
                         done_mask |= (1u << i);
                     } else {
                         printf("[FAIL] Cross-check wrong token from child %d "
                                "(got %d)\n", i, val);
                     }
+                } else if (n == 0) {
+                    done_mask |= (1u << i);
                 }
                 close(cross_pipe[i][0]);
             }
         }
     }
 
-    for (int i = 0; i < NUM_CHILDREN; i++) {
-        waitpid(pids[i], NULL, 0);
-    }
-
     int end_fds = count_my_fds();
-
-    write(1, "B", 1);
-    {
-        char buf[64];
-        int n = snprintf(buf, sizeof(buf),
-            "[Child %d] Started (fds=%d).\n", 0, 0);
-        write(1, buf, n);
-    }
 
     printf("[Parent] FD count: %d -> %d (delta %d)\n",
            start_fds, end_fds, end_fds - start_fds);

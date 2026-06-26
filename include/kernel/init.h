@@ -49,3 +49,24 @@ extern initcall_t __ap_initcall_end[];
 
 void early_init(uint32_t hw_id);
 void ap_early_init(uint32_t logic_id, uint32_t hw_id);
+
+static inline void do_early_initcalls(void) {
+    for (initcall_t* call = __early_initcall_start; call < __early_initcall_end; call++) {
+        if (!call || !*call) continue;
+        (*call)();
+    }
+}
+
+static inline void do_late_initcalls(void) {
+    for (initcall_t* call = __late_initcall_start; call < __late_initcall_end; call++) {
+        if (!call || !*call) continue;
+        (*call)();
+    }
+}
+
+static inline void do_ap_initcalls(void) {
+    for (initcall_t* call = __ap_initcall_start; call < __ap_initcall_end; call++) {
+        if (!call || !*call) continue;
+        (*call)();
+    }
+}

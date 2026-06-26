@@ -245,7 +245,6 @@ int64_t sys_read(int fd, void *user_buf, size_t count) {
     if (fd < 0 || fd >= MAX_FILES) return -EBADF;
     if (count == 0) return 0;
     if (!is_user_address_range(user_buf, count)) {
-        dprintf("[sys_read] Invalid user address range: fd=%d, buf=%p, count=%lu\n", fd, user_buf, count);
         return -EFAULT;
     }
 
@@ -261,12 +260,6 @@ int64_t sys_read(int fd, void *user_buf, size_t count) {
 
     char kbuf[4096];
     size_t total = 0;
-
-    if (f && f->f_vn) {
-        dprintf("[sys_read] fd: %d (%s), buf: %p, count: %lu\n", fd, f->f_vn->v_name, user_buf, count);
-    } else {
-        dprintf("[sys_read] fd: %d (unknown), buf: %p, count: %lu\n", fd, user_buf, count);
-    }
 
     bool is_gbm = (f && f->f_vn && strcmp(f->f_vn->v_name, "libgbm.so") == 0);
 

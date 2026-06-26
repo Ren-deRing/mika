@@ -503,7 +503,6 @@ uintptr_t vma_resolve_fault(struct proc *p, uintptr_t addr) {
             vput(vn);
             return cached;
         }
-        dprintf("[vma] SHARED cache MISS vn=%p off=%ld\n", vn, file_offset);
     }
 
     memset(p2v(phys), 0, PAGE_SIZE);
@@ -514,15 +513,12 @@ uintptr_t vma_resolve_fault(struct proc *p, uintptr_t addr) {
     }
     int n = vn->ops->read(vn, p2v(phys), PAGE_SIZE, file_offset);
     if (n < 0) {
-        dprintf("[vma] file read error %d at offset %ld\n", n, file_offset);
         page_free(pg, 0);
         vput(vn);
         return 0;
     }
 
     if (vma_flags & MMU_FLAGS_SHARED) {
-        dprintf("[vma] SHARED register vn=%p off=%ld phys=%p [0]=0x%02x\n",
-                vn, file_offset, (void*)phys, *(uint8_t*)p2v(phys));
         vma_shared_register(vn, file_offset, phys);
     }
 

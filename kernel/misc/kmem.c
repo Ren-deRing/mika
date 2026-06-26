@@ -42,10 +42,7 @@ static int kmem_get_index(size_t size) {
     if (size <= 8) return 0;
     if (size > 2048) return -1;
 
-    uint32_t leading_zeros = __builtin_clz((uint32_t)size - 1);
-    int approximate_idx = 31 - leading_zeros;
-
-    for (int i = (approximate_idx > 0 ? approximate_idx : 0); i < KMEM_NUM_CLASSES; i++) {
+    for (int i = 1; i < KMEM_NUM_CLASSES; i++) {
         if (size <= kmem_class_sizes[i]) return i;
     }
     return -1;
