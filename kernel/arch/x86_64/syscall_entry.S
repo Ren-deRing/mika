@@ -7,7 +7,7 @@
 syscall_entry:
     swapgs
     movq %rsp, %gs:CPU_USER_RSP
-    movq %gs:8, %rsp
+    movq %gs:CPU_KERNEL_RSP, %rsp
     subq $TRAPFRAME_SIZE, %rsp
     movq %rax, TF_RAX(%rsp)
     movq %rbx, TF_RBX(%rsp)

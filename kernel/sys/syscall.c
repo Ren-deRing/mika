@@ -6,7 +6,7 @@
 #include <kernel/cpu.h>
 #include <string.h>
 
-#define USER_ADDR_LIMIT  0x0000800000000000UL
+#define USER_ADDR_LIMIT  arch_get_user_addr_limit()
 
 typedef int64_t (*syscall_t)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 
@@ -35,7 +35,7 @@ int copy_to_user(void *user_dest, const void *src, size_t n) {
         size_t to_copy = 4096 - page_offset;
         if (to_copy > (n - copied)) to_copy = n - copied;
 
-        memcpy((void *)p2v(paddr), s + copied, to_copy);
+        memcpy((void *)phys_to_virt(paddr), s + copied, to_copy);
         copied += to_copy;
     }
     return 0;
@@ -56,7 +56,7 @@ int copy_from_user(void *dest, const void *user_src, size_t n) {
         size_t to_copy = 4096 - page_offset;
         if (to_copy > (n - copied)) to_copy = n - copied;
 
-        memcpy(d + copied, (void *)p2v(paddr), to_copy);
+        memcpy(d + copied, (void *)phys_to_virt(paddr), to_copy);
         copied += to_copy;
     }
     return 0;
@@ -77,7 +77,7 @@ int copy_str_from_user(char *dest, const char *user_src, size_t max_len) {
         size_t to_copy = 4096 - page_offset;
         if (to_copy > (max_len - copied)) to_copy = max_len - copied;
 
-        const char *src_ptr = (const char *)p2v(paddr);
+        const char *src_ptr = (const char *)phys_to_virt(paddr);
         for (size_t i = 0; i < to_copy; i++) {
             dest[copied] = src_ptr[i];
             if (dest[copied] == '\0') {
@@ -150,6 +150,7 @@ static syscall_t syscall_table[] = {
     [77] = (syscall_t)sys_ftruncate,
     [82] = (syscall_t)sys_rename,
     [83] = (syscall_t)sys_mkdir,
+    [84] = (syscall_t)sys_rmdir,
     [87] = (syscall_t)sys_unlink,
     [88] = (syscall_t)sys_symlink,
     [89] = (syscall_t)sys_readlink,
@@ -192,6 +193,7 @@ static syscall_t syscall_table[] = {
     [293] = (syscall_t)sys_pipe2,
     [318] = (syscall_t)sys_getrandom,
     [319] = (syscall_t)sys_memfd_create,
+    [324] = (syscall_t)sys_membarrier,
     [439] = (syscall_t)sys_faccessat2,
 };
 

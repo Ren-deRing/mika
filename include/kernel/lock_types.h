@@ -21,3 +21,10 @@ typedef struct {
 typedef struct {
     volatile uint32_t val;
 } rwlock_t;
+
+typedef struct {
+    spinlock_t wait_lock;
+    int count;           /* >0: readers, 0: unlocked, -1: write-locked */
+    struct thread *owner; /* write owner (for debug/recursion check) */
+    struct list_node wait_queue;
+} rw_semaphore_t;

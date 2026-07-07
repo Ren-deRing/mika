@@ -30,7 +30,6 @@ static ssize_t pipe_read(struct vnode *vp, void *buf, size_t n, off_t off) {
     if (!pb) return -EINVAL;
 
     size_t bytes_read = 0;
-    char *dest = (char *)buf;
 
     while (bytes_read < n) {
         spin_lock(&pb->lock);
@@ -44,11 +43,27 @@ static ssize_t pipe_read(struct vnode *vp, void *buf, size_t n, off_t off) {
             continue;
         }
 
-        while (pb->size > 0 && bytes_read < n) {
-            dest[bytes_read++] = pb->buf[pb->head];
-            pb->head = (pb->head + 1) % PIPE_BUF_SIZE;
-            pb->size--;
+        size_t to_read = n - bytes_read;
+        if (to_read > pb->size) to_read = pb->size;
+
+        char kbuf[256];
+        size_t batch = 0;
+        while (batch < to_read) {
+            size_t chunk = to_read - batch;
+            if (chunk > sizeof(kbuf)) chunk = sizeof(kbuf);
+            for (size_t i = 0; i < chunk; i++) {
+                kbuf[i] = pb->buf[pb->head];
+                pb->head = (pb->head + 1) % PIPE_BUF_SIZE;
+                pb->size--;
+            }
+            if (copy_to_user((char *)buf + bytes_read + batch, kbuf, chunk) < 0) {
+                spin_unlock(&pb->lock);
+                return bytes_read > 0 ? (ssize_t)bytes_read : -EFAULT;
+            }
+            batch += chunk;
         }
+        bytes_read += batch;
+
         spin_unlock(&pb->lock);
     }
 
@@ -61,7 +76,6 @@ static ssize_t pipe_write(struct vnode *vp, const void *buf, size_t n, off_t off
     if (!pb) return -EINVAL;
 
     size_t bytes_written = 0;
-    const char *src = (const char *)buf;
 
     while (bytes_written < n) {
         spin_lock(&pb->lock);
@@ -77,12 +91,27 @@ static ssize_t pipe_write(struct vnode *vp, const void *buf, size_t n, off_t off
             continue;
         }
 
-        while (free_space > 0 && bytes_written < n) {
-            pb->buf[pb->tail] = src[bytes_written++];
-            pb->tail = (pb->tail + 1) % PIPE_BUF_SIZE;
-            pb->size++;
-            free_space--;
+        size_t to_write = n - bytes_written;
+        if (to_write > free_space) to_write = free_space;
+
+        char kbuf[256];
+        size_t batch = 0;
+        while (batch < to_write) {
+            size_t chunk = to_write - batch;
+            if (chunk > sizeof(kbuf)) chunk = sizeof(kbuf);
+            if (copy_from_user(kbuf, (const char *)buf + bytes_written + batch, chunk) < 0) {
+                spin_unlock(&pb->lock);
+                return bytes_written > 0 ? (ssize_t)bytes_written : -EFAULT;
+            }
+            for (size_t i = 0; i < chunk; i++) {
+                pb->buf[pb->tail] = kbuf[i];
+                pb->tail = (pb->tail + 1) % PIPE_BUF_SIZE;
+                pb->size++;
+            }
+            batch += chunk;
         }
+        bytes_written += batch;
+
         spin_unlock(&pb->lock);
     }
 

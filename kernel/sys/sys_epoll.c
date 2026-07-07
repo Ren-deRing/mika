@@ -30,6 +30,8 @@
 #define EPOLL_CTL_DEL 2
 #define EPOLL_CTL_MOD 3
 
+#define EPOLLONESHOT 0x40000000
+
 extern struct vnode_ops unix_socket_ops;
 
 uint32_t check_fd_readiness(int fd, uint32_t events) {
@@ -272,6 +274,9 @@ int64_t sys_epoll_wait(int epfd, void *user_events, int maxevents, int timeout) 
                 events[ready_count].events = revents & req_events;
                 events[ready_count].data = ei->items[i].event.data;
                 ready_count++;
+                if (ei->items[i].event.events & EPOLLONESHOT) {
+                    ei->items[i].event.events = 0;
+                }
             }
         }
 

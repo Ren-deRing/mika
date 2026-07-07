@@ -15,14 +15,14 @@
 .extern thread_post_switch_hook
 
 arch_start_thread:
-    movq 16(%rdi), %rsp # rsp = t0->t_kstack
-    addq $8192, %rsp    # rsp += KSTACK_SIZE
+    movq THREAD_KSTACK(%rdi), %rsp
+    addq $KSTACK_SIZE, %rsp
 
     jmp generic_main
 
 arch_start_ap_thread:
-    movq 16(%rdi), %rsp # rsp = t->t_kstack
-    addq $8192, %rsp    # rsp += KSTACK_SIZE
+    movq THREAD_KSTACK(%rdi), %rsp
+    addq $KSTACK_SIZE, %rsp
 
     jmp ap_main
 

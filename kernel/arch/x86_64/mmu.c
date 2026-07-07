@@ -17,6 +17,7 @@
 #include <kernel/sched.h>
 #include <kernel/lock.h>
 #include <kernel/intc.h>
+#include <kernel/kasan.h>
 
 static spinlock_t g_kernel_mmu_lock = SPINLOCK_INITIALIZER;
 
@@ -25,7 +26,7 @@ static spinlock_t g_kernel_mmu_lock = SPINLOCK_INITIALIZER;
 
 static inline spinlock_t* mmu_get_lock(page_table_t* map) {
     if (!map) return &g_kernel_mmu_lock;
-    page_t* pg = phys_to_page(v2p(map));
+    page_t* pg = phys_to_page(virt_to_phys(map));
     if (pg && pg->pg_proc) {
         struct proc* p = (struct proc*)pg->pg_proc;
         return &p->p_vm_lock;
@@ -59,7 +60,7 @@ void handle_page_fault(struct trapframe *regs, void *data);
 #define GET_PD_IDX(v)   (((v) >> 21) & 0x1FF)
 #define GET_PT_IDX(v)   (((v) >> 12) & 0x1FF)
 
-#define ENTRY_TO_VIRT(e) (p2v((e) & PAGE_ADDR_MASK))
+#define ENTRY_TO_VIRT(e) (phys_to_virt((e) & PAGE_ADDR_MASK))
 
 typedef struct {
     page_t* free_lists[MAX_ORDER];
@@ -131,7 +132,7 @@ void pmm_init(void) {
 
     if (array_phys_addr == 0) return; 
 
-    g_pmm.all_pages_array = (page_t*)(p2v(array_phys_addr));
+    g_pmm.all_pages_array = (page_t*)(phys_to_virt(array_phys_addr));
     memset(g_pmm.all_pages_array, 0, array_size);
 
     uint64_t array_end = array_phys_addr + array_size;
@@ -321,10 +322,10 @@ pt_entry_t* vmm_get_pte(page_table_t* pml4, uint64_t virt, bool allocate) {
             if (!new_table_page) return NULL;
 
             uint64_t new_table_phys = page_to_phys(new_table_page);
-            memset(p2v(new_table_phys), 0, PAGE_SIZE);
+            memset(phys_to_virt(new_table_phys), 0, PAGE_SIZE);
 
             new_table_page->ref_count = 0;
-            page_t* parent_page = phys_to_page(v2p(current_table));
+            page_t* parent_page = phys_to_page(virt_to_phys(current_table));
             if (parent_page) parent_page->ref_count++;
 
             *entry = new_table_phys | X86_PTE_PRESENT | X86_PTE_WRITABLE | X86_PTE_USER;
@@ -353,7 +354,7 @@ static void vmm_free_pt(page_table_t* pt) {
             pt->entries[i] = 0;
         }
     }
-    pmm_free_pages(phys_to_page(v2p(pt)), 0);
+    pmm_free_pages(phys_to_page(virt_to_phys(pt)), 0);
 }
 
 bool vmm_map_huge(page_table_t* pml4, uint64_t virt, uint64_t phys, uint64_t x86_flags) {
@@ -369,10 +370,10 @@ bool vmm_map_huge(page_table_t* pml4, uint64_t virt, uint64_t phys, uint64_t x86
             if (!new_table_page) return false;
             
             uint64_t new_table_phys = page_to_phys(new_table_page);
-            memset(p2v(new_table_phys), 0, PAGE_SIZE);
+            memset(phys_to_virt(new_table_phys), 0, PAGE_SIZE);
             
             new_table_page->ref_count = 0;
-            page_t* parent_page = phys_to_page(v2p(current_table));
+            page_t* parent_page = phys_to_page(virt_to_phys(current_table));
             if (parent_page) parent_page->ref_count++;
 
             *entry = new_table_phys | X86_PTE_PRESENT | X86_PTE_WRITABLE | X86_PTE_USER;
@@ -392,7 +393,7 @@ bool vmm_map_huge(page_table_t* pml4, uint64_t virt, uint64_t phys, uint64_t x86
             if (old_huge_page && old_huge_page->ref_count > 0) old_huge_page->ref_count--;
         }
     } else {
-        page_t* pd_page = phys_to_page(v2p(current_table));
+        page_t* pd_page = phys_to_page(virt_to_phys(current_table));
         if (pd_page) pd_page->ref_count++;
     }
 
@@ -410,7 +411,7 @@ bool vmm_map(page_table_t* pml4, uint64_t virt, uint64_t phys, uint64_t x86_flag
 
     if (!(*pte & X86_PTE_PRESENT)) {
         uintptr_t pt_vaddr = ALIGN_DOWN((uintptr_t)pte, PAGE_SIZE);
-        page_t* pt_page = phys_to_page(v2p((void*)pt_vaddr));
+        page_t* pt_page = phys_to_page(virt_to_phys((void*)pt_vaddr));
         if (pt_page) pt_page->ref_count++;
     } else {
         page_t* old_page = phys_to_page(*pte & PAGE_ADDR_MASK);
@@ -434,7 +435,7 @@ void vmm_init(void) {
         while(1);
     }
     
-    g_kernel_pagemap = (page_table_t*)p2v(page_to_phys(pml4_page));
+    g_kernel_pagemap = (page_table_t*)phys_to_virt(page_to_phys(pml4_page));
     memset(g_kernel_pagemap, 0, PAGE_SIZE);
     pml4_page->ref_count = 1;
 
@@ -445,15 +446,15 @@ void vmm_init(void) {
         uint64_t top = ALIGN_DOWN(entry->base + entry->length, PAGE_SIZE_2M);
 
         for (uint64_t phys = base; phys < top; phys += PAGE_SIZE_2M) {
-            uint64_t virt = (uint64_t)p2v(phys);
+            uint64_t virt = (uint64_t)phys_to_virt(phys);
             vmm_map_huge(g_kernel_pagemap, virt, phys, X86_PTE_PRESENT | X86_PTE_WRITABLE);
         }
 
         for (uint64_t phys = ALIGN_UP(entry->base, PAGE_SIZE); phys < base; phys += PAGE_SIZE) {
-            vmm_map(g_kernel_pagemap, (uint64_t)p2v(phys), phys, X86_PTE_PRESENT | X86_PTE_WRITABLE);
+            vmm_map(g_kernel_pagemap, (uint64_t)phys_to_virt(phys), phys, X86_PTE_PRESENT | X86_PTE_WRITABLE);
         }
         for (uint64_t phys = top; phys < ALIGN_DOWN(entry->base + entry->length, PAGE_SIZE); phys += PAGE_SIZE) {
-            vmm_map(g_kernel_pagemap, (uint64_t)p2v(phys), phys, X86_PTE_PRESENT | X86_PTE_WRITABLE);
+            vmm_map(g_kernel_pagemap, (uint64_t)phys_to_virt(phys), phys, X86_PTE_PRESENT | X86_PTE_WRITABLE);
         }
     }
 
@@ -489,7 +490,7 @@ void vmm_init(void) {
             }
 
             uint64_t new_table_phys = page_to_phys(new_table_page);
-            memset(p2v(new_table_phys), 0, PAGE_SIZE);
+            memset(phys_to_virt(new_table_phys), 0, PAGE_SIZE);
 
             g_kernel_pagemap->entries[i] = new_table_phys | X86_PTE_PRESENT | X86_PTE_WRITABLE;
             
@@ -497,7 +498,7 @@ void vmm_init(void) {
         }
     }
 
-    set_cr3(v2p(g_kernel_pagemap));
+    set_cr3(virt_to_phys(g_kernel_pagemap));
 
     extern void register_handler(uint8_t vector, handler_t handler, void *data);
     register_handler(14, handle_page_fault, NULL);
@@ -551,7 +552,7 @@ void vmm_unmap(page_table_t* pml4, uint64_t virt) {
 }
 
 page_table_t* vmm_get_current_pml4(void) {
-    return (page_table_t*)p2v(get_cr3());
+    return (page_table_t*)phys_to_virt(get_cr3());
 }
 
 uint64_t vmm_get_phys(page_table_t* pml4, uint64_t virt) {
@@ -585,7 +586,7 @@ page_table_t* vmm_create_user_map(void) {
     page_t* pml4_page = pmm_alloc_pages(0);
     if (!pml4_page) return NULL;
 
-    page_table_t* user_pml4 = (page_table_t*)p2v(page_to_phys(pml4_page));
+    page_table_t* user_pml4 = (page_table_t*)phys_to_virt(page_to_phys(pml4_page));
     memset(user_pml4, 0, PAGE_SIZE);
 
     for (int i = 256; i < 512; i++) {
@@ -640,17 +641,17 @@ void vmm_destroy_map(page_table_t* pml4) {
                         }
                     }
                 }
-                pmm_free_pages(phys_to_page(v2p(pt)), 0);
+                pmm_free_pages(phys_to_page(virt_to_phys(pt)), 0);
             }
-            pmm_free_pages(phys_to_page(v2p(pd)), 0);
+            pmm_free_pages(phys_to_page(virt_to_phys(pd)), 0);
         }
-        pmm_free_pages(phys_to_page(v2p(pdpt)), 0);
+        pmm_free_pages(phys_to_page(virt_to_phys(pdpt)), 0);
     }
 
-    pmm_free_pages(phys_to_page(v2p(pml4)), 0);
+    pmm_free_pages(phys_to_page(virt_to_phys(pml4)), 0);
 
     if (vmm_get_current_pml4() == pml4) {
-        set_cr3(v2p(g_kernel_pagemap));
+        set_cr3(virt_to_phys(g_kernel_pagemap));
     }
 }
 
@@ -681,7 +682,11 @@ void mmu_destroy_map(page_table_t* map) {
 }
 
 page_t* page_alloc(uint8_t order) {
-    return pmm_alloc_pages(order);
+    page_t *page = pmm_alloc_pages(order);
+    if (page) {
+        kasan_unpoison(phys_to_virt(page_to_phys(page)), (1UL << order) * PAGE_SIZE);
+    }
+    return page;
 }
 
 void page_free(page_t* page, uint8_t order) {
@@ -764,6 +769,10 @@ void mmu_protect_page(page_table_t* map, uintptr_t vaddr, int prot) {
             new_flags |= X86_PTE_SHARED;
         }
 
+        if (*pte & X86_PTE_COW) {
+            new_flags |= X86_PTE_COW;
+        }
+
         uint64_t paddr_mask = 0x000FFFFFFFFFF000ULL;
         uint64_t paddr = *pte & paddr_mask;
         
@@ -811,7 +820,7 @@ page_table_t *mmu_clone_map(page_table_t *parent_map) {
                     }
                     uint64_t child_phys = page_to_phys(child_page);
 
-                    memcpy(p2v(child_phys), p2v(parent_phys), PAGE_SIZE_2M);
+                    memcpy(phys_to_virt(child_phys), phys_to_virt(parent_phys), PAGE_SIZE_2M);
 
                     uint64_t flags = pde & ~PAGE_ADDR_MASK;
 
@@ -857,10 +866,72 @@ static inline uintptr_t read_cr2(void) {
 
 extern void panic(const char* description, struct trapframe *regs);
 
+static void kasan_handle_shadow_pf(uintptr_t addr) {
+    page_table_t* map = g_kernel_pagemap;
+    if (!map) panic("KASAN: no kernel pagemap", NULL);
+
+    int idx_pml4 = (addr >> 39) & 0x1FF;
+    int idx_pdpt = (addr >> 30) & 0x1FF;
+    int idx_pd   = (addr >> 21) & 0x1FF;
+    int idx_pt   = (addr >> 12) & 0x1FF;
+
+    page_table_t* cur = map;
+
+    pt_entry_t* pml4e = &cur->entries[idx_pml4];
+    if (!(*pml4e & X86_PTE_PRESENT)) {
+        page_t* pg = pmm_alloc_pages(0);
+        if (!pg) panic("KASAN: OOM on PML4 alloc", NULL);
+        uint64_t phys = page_to_phys(pg);
+        memset(phys_to_virt(phys), 0, PAGE_SIZE);
+        *pml4e = phys | X86_PTE_PRESENT | X86_PTE_WRITABLE;
+    }
+    cur = (page_table_t*)phys_to_virt(*pml4e & PAGE_ADDR_MASK);
+
+    pt_entry_t* pdpte = &cur->entries[idx_pdpt];
+    if (!(*pdpte & X86_PTE_PRESENT)) {
+        page_t* pg = pmm_alloc_pages(0);
+        if (!pg) panic("KASAN: OOM on PDPT alloc", NULL);
+        uint64_t phys = page_to_phys(pg);
+        memset(phys_to_virt(phys), 0, PAGE_SIZE);
+        *pdpte = phys | X86_PTE_PRESENT | X86_PTE_WRITABLE;
+    }
+    cur = (page_table_t*)phys_to_virt(*pdpte & PAGE_ADDR_MASK);
+
+    pt_entry_t* pde = &cur->entries[idx_pd];
+    if (!(*pde & X86_PTE_PRESENT)) {
+        page_t* pg = pmm_alloc_pages(0);
+        if (!pg) panic("KASAN: OOM on PD alloc", NULL);
+        uint64_t phys = page_to_phys(pg);
+        memset(phys_to_virt(phys), 0, PAGE_SIZE);
+        *pde = phys | X86_PTE_PRESENT | X86_PTE_WRITABLE;
+    }
+    cur = (page_table_t*)phys_to_virt(*pde & PAGE_ADDR_MASK);
+
+    pt_entry_t* pte = &cur->entries[idx_pt];
+    if (!(*pte & X86_PTE_PRESENT)) {
+        page_t* zpg = pmm_alloc_pages(0);
+        if (!zpg) panic("KASAN: OOM on shadow page", NULL);
+        uint64_t zphys = page_to_phys(zpg);
+        memset(phys_to_virt(zphys), 0, PAGE_SIZE);
+        *pte = zphys | X86_PTE_PRESENT | X86_PTE_WRITABLE | X86_PTE_ACCESSED;
+    } else {
+        *pte |= X86_PTE_WRITABLE | X86_PTE_ACCESSED;
+    }
+    invlpg(addr);
+}
+
 void handle_page_fault(struct trapframe *regs, void *data) {
     (void)data;
     uintptr_t fault_addr = read_cr2() & ~0xFFF;
     uint64_t err_code = regs->err_code;
+
+    // KASAN shadow lazy alloc (must be first — no locks to avoid deadlock)
+    if (fault_addr >= KASAN_SHADOW_START && fault_addr < KASAN_SHADOW_END) {
+        if ((regs->cs & 3) != 0)
+            panic("KASAN: user-mode shadow access", regs);
+        kasan_handle_shadow_pf(fault_addr);
+        return;
+    }
 
     // Not present
     if ((err_code & 1) == 0) {
@@ -881,7 +952,7 @@ void handle_page_fault(struct trapframe *regs, void *data) {
                     page_t *pg = page_alloc(0);
                     if (pg) {
                         phys = page_to_phys(pg);
-                        memset(p2v(phys), 0, PAGE_SIZE);
+                        memset(phys_to_virt(phys), 0, PAGE_SIZE);
                     }
                 }
 
@@ -896,7 +967,7 @@ void handle_page_fault(struct trapframe *regs, void *data) {
                 pt_entry_t *pte = vmm_get_pte(map, fault_addr, true);
                 if (pte && !(*pte & X86_PTE_PRESENT)) {
                     uintptr_t pt_vaddr = ALIGN_DOWN((uintptr_t)pte, PAGE_SIZE);
-                    page_t* pt_page = phys_to_page(v2p((void*)pt_vaddr));
+                    page_t* pt_page = phys_to_page(virt_to_phys((void*)pt_vaddr));
                     if (pt_page) pt_page->ref_count++;
                     *pte = phys | x86_flags;
                     page_t *mapped = phys_to_page(phys);
@@ -933,7 +1004,7 @@ void handle_page_fault(struct trapframe *regs, void *data) {
                         uint64_t new_phys = page_to_phys(new_pg);
                         
                         spin_unlock_irqrestore(lock, lock_flags);
-                        memcpy(p2v(new_phys), p2v(old_phys), PAGE_SIZE);      
+                        memcpy(phys_to_virt(new_phys), phys_to_virt(old_phys), PAGE_SIZE);      
                         lock_flags = spin_lock_irqsave(lock);
                         
                         pt_entry_t *re_pte = vmm_get_pte(map, fault_addr, false);
@@ -1006,7 +1077,7 @@ void mmu_tlb_shootdown_ex(page_table_t* map, uintptr_t vaddr) {
     struct cpu *this_cpu = curcpu;
     uint32_t this_cpu_id = this_cpu ? this_cpu->id : 0;
     
-    page_t* pg = map ? phys_to_page(v2p(map)) : NULL;
+    page_t* pg = map ? phys_to_page(virt_to_phys(map)) : NULL;
     struct proc* proc = pg ? (struct proc*)pg->pg_proc : NULL;
 
     if (vaddr >= KERNEL_BASE || !proc || proc->p_pid == 0) {

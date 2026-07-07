@@ -155,7 +155,7 @@ run: iso
 		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
 		-bios /usr/share/ovmf/OVMF.fd \
 		-serial stdio -d int,cpu_reset -smp 1 -accel kvm -cpu host \
-		-vga std
+		-vga std -s
 
 clean:
 	rm -rf $(BUILD_DIR) $(BIN_DIR)

@@ -30,6 +30,7 @@ int main() {
     printf("#define CPU_CURRENT_THREAD  0x%zx\n", offsetof(struct cpu, current_thread));
     printf("#define CPU_USER_RSP        0x%zx\n", offsetof(struct cpu, user_rsp));
     printf("#define CPU_KERNEL_RSP        0x%zx\n", offsetof(struct cpu, tss_rsp0));
+    printf("#define KSTACK_SIZE           %d\n", KSTACK_SIZE);
 
     printf("#define THREAD_NEED_RESCHED 0x%zx\n", offsetof(struct thread, t_need_resched));
     printf("#define THREAD_CONTEXT      0x%zx\n", offsetof(struct thread, t_context));

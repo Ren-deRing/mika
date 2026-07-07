@@ -5,7 +5,7 @@ LC_OBJS += $(patsubst ./%.S, $(OBJ_DIR)/libc/%.o, $(filter %.S, $(LC_SRCS)))
 
 LC_CFLAGS := $(CFLAGS) -mcmodel=kernel -mno-red-zone \
              -I. \
-             -I$(BASE_DIR)/libc/include
+             -I$(BASE_DIR)/libc/include -mno-sse -mno-sse2 -mno-mmx -mno-avx
 
 .PHONY: all clean
 

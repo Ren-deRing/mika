@@ -10,6 +10,7 @@
 #include <kernel/init.h>
 #include <kernel/cpu.h>
 #include <kernel/lock.h>
+#include <kernel/kasan.h>
 #include "kernel/printf.h"
 
 #include <string.h>
@@ -49,9 +50,10 @@ static int kmem_get_index(size_t size) {
 }
 
 static void* kmem_alloc_large(size_t size) {
-    uint32_t pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
+    size_t pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
+    if (pages > (1UL << (MAX_ORDER - 1))) return NULL;
     uint8_t order = 0;
-    while ((1U << order) < pages) order++;
+    while ((1UL << order) < pages) order++;
 
     page_t* p = page_alloc(order);
     if (!p) return NULL;
@@ -59,12 +61,12 @@ static void* kmem_alloc_large(size_t size) {
     p->obj_size = 0;
     p->order = order;
 
-    return (void*)p2v(page_to_phys(p));
+    return (void*)phys_to_virt(page_to_phys(p));
 }
 
 static kmem_magazine_t* kmem_internal_mag_alloc(void) {
     static kmem_magazine_t* free_mags = NULL;
-    static spinlock_t mag_alloc_lock = {0};
+    static spinlock_t mag_alloc_lock = SPINLOCK_INITIALIZER;
 
     uint64_t flags = spin_lock_irqsave(&mag_alloc_lock);
 
@@ -75,7 +77,7 @@ static kmem_magazine_t* kmem_internal_mag_alloc(void) {
             return NULL;
         }
 
-        kmem_magazine_t* batch = (kmem_magazine_t*)p2v(page_to_phys(p));
+        kmem_magazine_t* batch = (kmem_magazine_t*)phys_to_virt(page_to_phys(p));
         int count = PAGE_SIZE / sizeof(kmem_magazine_t);
 
         for (int i = 0; i < count - 1; i++) {
@@ -109,8 +111,10 @@ static kmem_magazine_t* kmem_get_empty_mag(int idx) {
 
     if (!mag) {
         mag = kmem_internal_mag_alloc();
+        if (!mag) return NULL;
     }
     mag->top = 0;
+    mag->next = NULL;
     return mag;
 }
 
@@ -145,12 +149,12 @@ static void kmem_setup_slab_page(page_t* p, uint32_t obj_size, uint8_t order) {
 
     p->obj_size = obj_size;
     p->order = order;
-    p->free_count = max_objs;
     p->is_free = false;
 
     page_t* curr_pg = p;
     for (uint32_t i = 0; i < num_pages; i++) {
         curr_pg->obj_size = obj_size;
+        curr_pg->free_count = max_objs;
         curr_pg++;
     }
 }
@@ -169,7 +173,7 @@ static void* kmem_depot_refill(int idx) {
             return NULL;
         }
 
-        d->current_chunk = (uintptr_t)p2v(page_to_phys(p));
+        d->current_chunk = (uintptr_t)phys_to_virt(page_to_phys(p));
         d->objs_remaining = (PAGE_SIZE << order) / size;
 
         kmem_setup_slab_page(p, size, order);
@@ -179,7 +183,7 @@ static void* kmem_depot_refill(int idx) {
     d->current_chunk += size;
     d->objs_remaining--;
 
-    page_t* page = phys_to_page(v2p(obj));
+    page_t* page = phys_to_page(virt_to_phys(obj));
     __atomic_sub_fetch(&page->free_count, 1, __ATOMIC_RELAXED);
 
     spin_unlock_irqrestore(&d->lock, flags);
@@ -220,7 +224,12 @@ void* kmalloc(size_t size) {
     if (size == 0) return NULL;
 
     if (size > KMEM_MAX_DIRECT) {
-        return kmem_alloc_large(size);
+        void* ptr = kmem_alloc_large(size);
+        if (ptr) {
+            page_t* pg = phys_to_page(virt_to_phys(ptr));
+            kasan_kmalloc(ptr, size, (size_t)PAGE_SIZE << pg->order);
+        }
+        return ptr;
     }
 
     int idx = kmem_get_index(size);
@@ -235,7 +244,9 @@ void* kmalloc(size_t size) {
     kmem_magazine_t* mag = c->magazines[idx];
 
     if (mag->top > 0) {
-        return mag->slots[--mag->top];
+        void* ptr = mag->slots[--mag->top];
+        kasan_kmalloc(ptr, size, kmem_class_sizes[idx]);
+        return ptr;
     }
 
     kmem_magazine_swap_empty(idx);
@@ -243,7 +254,9 @@ void* kmalloc(size_t size) {
     mag = c->magazines[idx];
 
     if (mag->top > 0) {
-        return mag->slots[--mag->top];
+        void* ptr = mag->slots[--mag->top];
+        kasan_kmalloc(ptr, size, kmem_class_sizes[idx]);
+        return ptr;
     }
 
     return NULL;
@@ -252,16 +265,20 @@ void* kmalloc(size_t size) {
 void kfree(void* ptr) {
     if (!ptr) return;
 
-    page_t* page = phys_to_page(v2p(ptr));
+    page_t* page = phys_to_page(virt_to_phys(ptr));
 
     if (page->obj_size == 0) {
+        kasan_kfree(ptr, (size_t)PAGE_SIZE << page->order);
         page_free(page, page->order);
         return;
     }
 
+    kasan_kfree(ptr, page->obj_size);
+
     __atomic_add_fetch(&page->free_count, 1, __ATOMIC_RELAXED);
 
     int idx = kmem_get_index(page->obj_size);
+    if (idx < 0 || idx >= KMEM_NUM_CLASSES) return;
     struct cpu* c = curcpu;
 
     if (!c->magazines[idx]) {
@@ -288,7 +305,7 @@ void* krealloc(void* ptr, size_t size) {
         return NULL;
     }
 
-    page_t* page = phys_to_page(v2p(ptr));
+    page_t* page = phys_to_page(virt_to_phys(ptr));
 
     size_t old_size = (page->obj_size == 0) ? 
                       (PAGE_SIZE << page->order) : page->obj_size;
@@ -307,6 +324,7 @@ void* krealloc(void* ptr, size_t size) {
 }
 
 void* kcalloc(size_t nmemb, size_t size) {
+    if (nmemb && size > SIZE_MAX / nmemb) return NULL;
     size_t total = nmemb * size;
     void* ptr = kmalloc(total);
     if (ptr) memset(ptr, 0, total);

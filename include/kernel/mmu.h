@@ -4,11 +4,12 @@
 #include <stdbool.h>
 
 #include <boot/bootinfo.h>
+#include <kernel/mmu_types.h>
 
 #define PAGE_SIZE       4096
 #define PAGE_SIZE_2M    (2ULL * 1024 * 1024)
 #define MAX_ORDER       11
-#define KERNEL_BASE     0xFFFF800000000000ULL
+#define KERNEL_BASE     ARCH_KERNEL_BASE
 
 #define MMU_FLAGS_READ     (1ULL << 0)
 #define MMU_FLAGS_WRITE    (1ULL << 1)
@@ -20,13 +21,15 @@
 #define ALIGN_DOWN(addr, align) ((uintptr_t)(addr) & ~((uintptr_t)(align) - 1))
 #define ALIGN_UP(addr, align)   (((uintptr_t)(addr) + (uintptr_t)(align) - 1) & ~((uintptr_t)(align) - 1))
 
-static inline void* p2v(uintptr_t phys) {
+static inline void* phys_to_virt(phys_addr_t phys) {
     return (void*)(phys + g_boot_info.hhdm_offset);
 }
+#define p2v(phys) phys_to_virt(phys)
 
-static inline uintptr_t v2p(void* virt) {
-    return (uintptr_t)virt - g_boot_info.hhdm_offset;
+static inline phys_addr_t virt_to_phys(const void* virt) {
+    return (phys_addr_t)virt - g_boot_info.hhdm_offset;
 }
+#define v2p(virt) virt_to_phys(virt)
 
 struct page {
     struct page* next;

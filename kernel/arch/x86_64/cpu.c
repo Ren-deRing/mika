@@ -68,9 +68,6 @@ void arch_timer_handler(struct trapframe *regs, void *data) {
 }
 
 void arch_cpu_set_fs_base(uintptr_t addr) {
-    uint32_t low = (uint32_t)addr;
-    uint32_t high = (uint32_t)(addr >> 32);
-    
     wrmsr(MSR_FS_BASE, addr);
 }
 
@@ -105,4 +102,41 @@ void arch_trigger_resched(uint32_t cpu_id) {
         struct cpu *target_cpu = &cpus[cpu_id];
         g_intc->send_ipi(target_cpu->hw_id, 0x45);
     }
+}
+
+void arch_fpu_save(void *buf) {
+    if (g_use_xsave) {
+        uint32_t lo = 0xFFFFFFFF, hi = 0xFFFFFFFF;
+        asm volatile("xsaveq (%0)" : : "r"(buf), "a"(lo), "d"(hi) : "memory");
+    } else {
+        asm volatile("fxsave (%0)" : : "r"(buf) : "memory");
+    }
+}
+
+void arch_fpu_restore(void *buf) {
+    if (g_use_xsave) {
+        uint32_t lo = 0xFFFFFFFF, hi = 0xFFFFFFFF;
+        asm volatile("xrstorq (%0)" : : "r"(buf), "a"(lo), "d"(hi) : "memory");
+    } else {
+        asm volatile("fxrstor (%0)" : : "r"(buf) : "memory");
+    }
+}
+
+uint64_t arch_get_random_seed(void) {
+    uint32_t lo, hi;
+    asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((uint64_t)hi << 32) | lo;
+}
+
+void arch_panic_halt(void) {
+    arch_irq_disable();
+    for (;;) arch_halt();
+}
+
+uint64_t arch_get_user_addr_limit(void) {
+    return 0x0000800000000000UL;
+}
+
+uint64_t arch_get_ticks(void) {
+    return arch_get_random_seed();
 }

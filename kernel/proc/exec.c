@@ -22,7 +22,7 @@ void arch_user_trampoline(void *arg) {
     arch_set_kernel_stack((uintptr_t)self->t_kstack + KSTACK_SIZE);
     
     arch_switch_mm(NULL, p); 
-    arch_enter_user_mode(p->p_entry, p->p_stack_top);
+    arch_enter_user_mode(p->p_entry, self->t_user_stack_top);
 }
 
 int proc_exec(void *elf_data, char *const argv[], char *const envp[]) {
@@ -50,7 +50,7 @@ int proc_exec(void *elf_data, char *const argv[], char *const envp[]) {
     uintptr_t stack_bottom = stack_top - USER_STACK_SIZE;
 
     struct vm_area *stack_vma = vma_alloc(stack_bottom, stack_top,
-        MMU_FLAGS_USER | MMU_FLAGS_READ | MMU_FLAGS_WRITE | MMU_FLAGS_EXEC, NULL, 0);
+        MMU_FLAGS_USER | MMU_FLAGS_READ | MMU_FLAGS_WRITE, NULL, 0);
     if (stack_vma) {
         uint64_t vma_lk = spin_lock_irqsave(&p->p_vma_lock);
         vma_insert(&p->p_vma_root, &p->p_vma_list, stack_vma);
@@ -62,12 +62,12 @@ int proc_exec(void *elf_data, char *const argv[], char *const envp[]) {
     page_table_t *old_map = p->p_vm_map;
     p->p_vm_map = new_map;
     {
-        page_t *pg = phys_to_page(v2p(new_map));
+        page_t *pg = phys_to_page(virt_to_phys(new_map));
         if (pg) pg->pg_proc = p;
     }
     if (old_map) mmu_destroy_map(old_map);
     p->p_entry = entry_point;
-    p->p_stack_top = final_rsp;
+    p->p_stack_top = USER_STACK_TOP;
     p->p_brk = ALIGN_UP(brk, PAGE_SIZE);
 
     struct thread *new_t = thread_create(p, __sync_fetch_and_add(&next_tid, 1), arch_user_trampoline, (void *)p);
@@ -200,15 +200,15 @@ uintptr_t setup_user_stack(page_table_t *new_map, uintptr_t user_stack_top,
             page_t *pg = page_alloc(0);
             if (!pg) { kfree(kbuf); return 0; }
             phys = page_to_phys(pg);
-            memset(p2v(phys), 0, PAGE_SIZE);
+            memset(phys_to_virt(phys), 0, PAGE_SIZE);
             mmu_map_4k(new_map, copy_dest_u & ~(PAGE_SIZE - 1), phys,
-                MMU_FLAGS_USER | MMU_FLAGS_READ | MMU_FLAGS_WRITE | MMU_FLAGS_EXEC);
+                MMU_FLAGS_USER | MMU_FLAGS_READ | MMU_FLAGS_WRITE);
         }
         size_t off_in_page = copy_dest_u % PAGE_SIZE;
         size_t to_copy = MIN(remain, PAGE_SIZE - off_in_page);
 
         void *src_addr = (void *)(curr_kbuf + offset_in_payload);
-        void *dst_addr = (void *)(p2v(phys & ~(PAGE_SIZE - 1)) + off_in_page);
+        void *dst_addr = (void *)(phys_to_virt(phys & ~(PAGE_SIZE - 1)) + off_in_page);
 
         memcpy(dst_addr, src_addr, to_copy);
         mmu_flush_cache(dst_addr, to_copy);

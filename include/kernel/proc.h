@@ -25,9 +25,9 @@ typedef uint64_t sigset_t;
 
 struct sigaction {
     void     (*sa_handler)(int);
-    sigset_t   sa_mask;
-    int        sa_flags;
+    uint64_t   sa_flags;
     void     (*sa_restorer)(void);
+    sigset_t   sa_mask;
 };
 
 extern pid_t next_pid;

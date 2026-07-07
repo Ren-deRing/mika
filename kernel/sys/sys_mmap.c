@@ -377,22 +377,70 @@ int64_t sys_brk(uintptr_t brk) {
     return brk;
 }
 
+static uint32_t prot_to_vma_flags(int prot) {
+    uint32_t flags = MMU_FLAGS_USER;
+    if (prot & 0x1) flags |= MMU_FLAGS_READ;
+    if (prot & 0x2) flags |= MMU_FLAGS_WRITE;
+    if (prot & 0x4) flags |= MMU_FLAGS_EXEC;
+    return flags;
+}
+
 int64_t sys_mprotect(uintptr_t start, size_t len, int prot) {
     if (len == 0) return 0;
     if (!is_user_address_range((void *)start, len)) return -EINVAL;
 
     uintptr_t addr = ALIGN_DOWN(start, PAGE_SIZE);
     uintptr_t end = ALIGN_UP(start + len, PAGE_SIZE);
+    if (addr >= end) return -EINVAL;
     page_table_t *map = curproc->p_vm_map;
 
     for (uintptr_t i = addr; i < end; i += PAGE_SIZE) {
         if (mmu_translate(map, i) == 0) {
-            return -ENOMEM;
+            uint64_t lk = spin_lock_irqsave(&curproc->p_vma_lock);
+            struct vm_area *vma = vma_find(curproc->p_vma_root, i);
+            spin_unlock_irqrestore(&curproc->p_vma_lock, lk);
+            if (!vma) return -ENOMEM;
         }
     }
 
+    uint32_t vma_flags = prot_to_vma_flags(prot);
+    uint64_t vma_lk = spin_lock_irqsave(&curproc->p_vma_lock);
+
+    struct vm_area *vma = vma_find_first(curproc->p_vma_root, addr);
+    while (vma && vma->start < end) {
+        if ((struct list_node *)vma == &curproc->p_vma_list) break;
+
+        if (vma->start < addr) {
+            vma = vma_split(&curproc->p_vma_root, &curproc->p_vma_list, vma, addr);
+            if (!vma) break;
+        }
+
+        if (vma->end > end) {
+            struct vm_area *right = vma_split(&curproc->p_vma_root, &curproc->p_vma_list, vma, end);
+            if (!right) break;
+        }
+
+        vma->flags = (vma->flags & ~(MMU_FLAGS_READ|MMU_FLAGS_WRITE|MMU_FLAGS_EXEC)) | vma_flags;
+
+        vma = vma_next(vma);
+    }
+
+    spin_unlock_irqrestore(&curproc->p_vma_lock, vma_lk);
+
+    // 페이지 매핑/보호 (demand paging 지원)
     for (uintptr_t i = addr; i < end; i += PAGE_SIZE) {
-        mmu_protect_page(map, i, prot);
+        if (mmu_translate(map, i) == 0) {
+            page_t *pg = page_alloc(0);
+            if (!pg) return -ENOMEM;
+            uintptr_t phys = page_to_phys(pg);
+            memset(phys_to_virt(phys), 0, PAGE_SIZE);
+            if (!mmu_map_4k(map, i, phys, vma_flags | MMU_FLAGS_USER)) {
+                page_free(pg, 0);
+                return -ENOMEM;
+            }
+        } else {
+            mmu_protect_page(map, i, prot);
+        }
     }
 
     return 0;
@@ -486,9 +534,9 @@ int64_t sys_mremap(uintptr_t old_addr, size_t old_size, size_t new_size, int fla
                         return -ENOMEM;
                     }
                     uintptr_t allocated_paddr = page_to_phys(pg);
-                    memset(p2v(allocated_paddr), 0, PAGE_SIZE);
+                    memset(phys_to_virt(allocated_paddr), 0, PAGE_SIZE);
 
-                    int n = orig_vn->ops->read(orig_vn, p2v(allocated_paddr), PAGE_SIZE, file_offset);
+                    int n = orig_vn->ops->read(orig_vn, phys_to_virt(allocated_paddr), PAGE_SIZE, file_offset);
                     if (n < 0) {
                         dprintf("[sys_mremap] File read error %d at offset %ld during inplace grow\n", n, file_offset);
                         page_free(pg, 0);
@@ -554,8 +602,27 @@ int64_t sys_mremap(uintptr_t old_addr, size_t old_size, size_t new_size, int fla
                     }
                     return -ENOMEM;
                 }
+            } else {
+                page_t *pg = page_alloc(0);
+                if (!pg) return -ENOMEM;
+                uintptr_t paddr = page_to_phys(pg);
+                memset(phys_to_virt(paddr), 0, PAGE_SIZE);
+                if (!mmu_map_4k(curproc->p_vm_map, i, paddr, orig_mmu_flags)) {
+                    page_free(pg, 0);
+                    return -ENOMEM;
+                }
             }
         }
+
+        uint64_t vma_lk = spin_lock_irqsave(&curproc->p_vma_lock);
+        struct vm_area *vma = vma_find(curproc->p_vma_root, old_addr);
+        if (vma && vma->start == old_addr && vma->end == old_addr + aligned_old && vma->vn == NULL) {
+            vma_erase(&curproc->p_vma_root, &curproc->p_vma_list, vma);
+            vma->end = old_addr + aligned_new;
+            vma_insert(&curproc->p_vma_root, &curproc->p_vma_list, vma);
+        }
+        spin_unlock_irqrestore(&curproc->p_vma_lock, vma_lk);
+
         return old_addr;
     }
 
@@ -636,9 +703,9 @@ int64_t sys_mremap(uintptr_t old_addr, size_t old_size, size_t new_size, int fla
                     return -ENOMEM;
                 }
                 uintptr_t allocated_paddr = page_to_phys(pg);
-                memset(p2v(allocated_paddr), 0, PAGE_SIZE);
+                memset(phys_to_virt(allocated_paddr), 0, PAGE_SIZE);
 
-                int n = orig_vn->ops->read(orig_vn, p2v(allocated_paddr), PAGE_SIZE, file_offset);
+                int n = orig_vn->ops->read(orig_vn, phys_to_virt(allocated_paddr), PAGE_SIZE, file_offset);
                 if (n < 0) {
                     dprintf("[sys_mremap] File read error %d at offset %ld during moved grow\n", n, file_offset);
                     page_free(pg, 0);

@@ -89,6 +89,13 @@ void arch_set_current_thread(struct thread *t);
 
 uint64_t arch_get_system_ticks(void);
 
+void arch_fpu_save(void *buf);
+void arch_fpu_restore(void *buf);
+uint64_t arch_get_random_seed(void);
+void arch_panic_halt(void);
+uint64_t arch_get_user_addr_limit(void);
+uint64_t arch_get_ticks(void);
+
 int arch_proc_init(struct proc *p);
 void arch_proc_destroy(struct proc *p);
 int arch_thread_init(struct thread *t);

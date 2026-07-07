@@ -11,6 +11,13 @@
 
 extern struct vnode *g_root_vnode;
 
+static uint32_t elf_pflags_to_mmu(uint32_t p_flags) {
+    uint32_t flags = MMU_FLAGS_USER | MMU_FLAGS_READ;
+    if (p_flags & PF_W) flags |= MMU_FLAGS_WRITE;
+    if (p_flags & PF_X) flags |= MMU_FLAGS_EXEC;
+    return flags;
+}
+
 page_table_t* load_elf(void *elf_data, uintptr_t *out_entry, uintptr_t *out_brk, 
                       uintptr_t *out_phdr_vaddr, uint64_t *out_phnum,
                       uintptr_t *out_interpreter_base) {
@@ -64,8 +71,8 @@ page_table_t* load_elf(void *elf_data, uintptr_t *out_entry, uintptr_t *out_brk,
                 page_t *p = page_alloc(0);
                 if (!p) { mmu_destroy_map(new_map); return NULL; }
                 uintptr_t paddr = page_to_phys(p);
-                memset(p2v(paddr), 0, PAGE_SIZE);
-                mmu_map(new_map, curr, paddr, MMU_FLAGS_USER | MMU_FLAGS_WRITE | MMU_FLAGS_EXEC);
+                memset(phys_to_virt(paddr), 0, PAGE_SIZE);
+                mmu_map(new_map, curr, paddr, elf_pflags_to_mmu(phdrs[i].p_flags));
             }
         }
 
@@ -84,7 +91,7 @@ page_table_t* load_elf(void *elf_data, uintptr_t *out_entry, uintptr_t *out_brk,
 
                 size_t off_in_page = curr_v % PAGE_SIZE;
                 size_t to_copy = MIN(file_size - written, PAGE_SIZE - off_in_page);
-                void *dest_addr = (void *)(p2v(phys & ~(PAGE_SIZE - 1)) + off_in_page);
+                void *dest_addr = (void *)(phys_to_virt(phys & ~(PAGE_SIZE - 1)) + off_in_page);
                 void *src_addr = (void *)((uintptr_t)elf_data + file_offset + written);
                 memcpy(dest_addr, src_addr, to_copy);
                 mmu_flush_cache(dest_addr, to_copy);
@@ -200,10 +207,9 @@ page_table_t* load_elf(void *elf_data, uintptr_t *out_entry, uintptr_t *out_brk,
                 return NULL;
             }
             uintptr_t paddr = page_to_phys(p);
-            memset(p2v(paddr), 0, PAGE_SIZE);
+            memset(phys_to_virt(paddr), 0, PAGE_SIZE);
             
-            uint64_t temp_prot = MMU_FLAGS_USER | MMU_FLAGS_WRITE | MMU_FLAGS_EXEC;
-            mmu_map(new_map, curr, paddr, temp_prot);
+            mmu_map(new_map, curr, paddr, elf_pflags_to_mmu(phdrs[i].p_flags));
         }
     }
 
@@ -228,7 +234,7 @@ page_table_t* load_elf(void *elf_data, uintptr_t *out_entry, uintptr_t *out_brk,
             size_t off_in_page = curr_v % PAGE_SIZE;
             size_t to_copy = MIN(file_size - written, PAGE_SIZE - off_in_page);
 
-            void *dest_addr = (void *)(p2v(phys & ~(PAGE_SIZE - 1)) + off_in_page);
+            void *dest_addr = (void *)(phys_to_virt(phys & ~(PAGE_SIZE - 1)) + off_in_page);
             void *src_addr = (void *)((uintptr_t)elf_data + file_offset + written);
 
             memcpy(dest_addr, src_addr, to_copy);
@@ -261,10 +267,9 @@ page_table_t* load_elf(void *elf_data, uintptr_t *out_entry, uintptr_t *out_brk,
                 return NULL;
             }
             uintptr_t paddr = page_to_phys(p);
-            memset(p2v(paddr), 0, PAGE_SIZE);
+            memset(phys_to_virt(paddr), 0, PAGE_SIZE);
 
-            uint64_t temp_prot = MMU_FLAGS_USER | MMU_FLAGS_WRITE | MMU_FLAGS_EXEC;
-            mmu_map_4k(new_map, curr, paddr, temp_prot);
+            mmu_map_4k(new_map, curr, paddr, elf_pflags_to_mmu(iphdrs[j].p_flags));
         }
     }
 
@@ -289,7 +294,7 @@ page_table_t* load_elf(void *elf_data, uintptr_t *out_entry, uintptr_t *out_brk,
             size_t off_in_page = curr_v % PAGE_SIZE;
             size_t to_copy = MIN(file_size - written, PAGE_SIZE - off_in_page);
 
-            void *dest_addr = (void *)(p2v(phys & ~(PAGE_SIZE - 1)) + off_in_page);
+            void *dest_addr = (void *)(phys_to_virt(phys & ~(PAGE_SIZE - 1)) + off_in_page);
             void *src_addr = (void *)((uintptr_t)interp_data + file_offset + written);
 
             memcpy(dest_addr, src_addr, to_copy);

@@ -19,3 +19,6 @@ void file_lock(struct file *f);
 void file_unlock(struct file *f);
 void file_lock_irqsave(struct file *f, uint64_t *flags);
 void file_unlock_irqrestore(struct file *f, uint64_t flags);
+
+struct file *fdget(int fd);
+void fdput(struct file *f);

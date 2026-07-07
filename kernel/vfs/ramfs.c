@@ -137,7 +137,8 @@ int ramfs_create(struct vnode *dvp, const char *name, mode_t mode, struct vnode 
         return -EEXIST;
     }
 
-    uint32_t type = S_ISLNK(mode) ? S_IFLNK : S_IFREG;
+    uint32_t type = mode & S_IFMT;
+    if (!type) type = S_IFREG;
     struct vnode *nvp = ramfs_create_vnode(type);
     if (!nvp) {
         write_unlock(&dvp->rwlock);
@@ -365,6 +366,27 @@ int ramfs_remove(struct vnode *dvp, const char *name) {
     return -ENOENT;
 }
 
+int ramfs_rmdir(struct vnode *dvp, const char *name) {
+    write_lock(&dvp->rwlock);
+
+    struct ramfs_node *dnode = (struct ramfs_node *)dvp->data;
+    struct ramfs_entry *curr = dnode->entries;
+    while (curr) {
+        if (strcmp(curr->name, name) == 0) {
+            struct ramfs_node *fnode = (struct ramfs_node *)curr->vn->data;
+            if (fnode->entries) {
+                write_unlock(&dvp->rwlock);
+                return -ENOTEMPTY;
+            }
+            break;
+        }
+        curr = curr->next;
+    }
+
+    write_unlock(&dvp->rwlock);
+    return ramfs_remove(dvp, name);
+}
+
 int ramfs_readdir(struct vnode *vp, void *dirent_buf, size_t count, off_t *off) {
     read_lock(&vp->rwlock);
 
@@ -586,6 +608,7 @@ struct vnode_ops ramfs_ops = {
     .write    = ramfs_write,
     .read     = ramfs_read,
     .remove   = ramfs_remove,
+    .rmdir    = ramfs_rmdir,
     .getattr  = ramfs_getattr,
     .setattr  = ramfs_setattr,
     .readdir  = ramfs_readdir,

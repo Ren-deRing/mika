@@ -34,20 +34,7 @@ int64_t sys_clone(uint64_t flags, void *child_stack, void *ptid, void *ctid, uin
     int *child_tid = (int *)ctid;
 
     if (curthread->t_arch_data) {
-        extern bool g_use_xsave;
-        if (g_use_xsave) {
-            uint32_t eax = 0xFFFFFFFF;
-            uint32_t edx = 0xFFFFFFFF;
-            asm volatile("xsaveq (%0)" 
-                         : 
-                         : "r"(curthread->t_arch_data), "a"(eax), "d"(edx) 
-                         : "memory");
-        } else {
-            asm volatile("fxsave (%0)"
-                         :
-                         : "r"(curthread->t_arch_data)
-                         : "memory");
-        }
+        arch_fpu_save(curthread->t_arch_data);
     }
 
     if (flags & CLONE_THREAD) {
@@ -146,11 +133,26 @@ int64_t sys_clone(uint64_t flags, void *child_stack, void *ptid, void *ctid, uin
             goto err_proc;
         }
         if (child_p->p_vm_map) {
-            page_t* pg = phys_to_page(v2p(child_p->p_vm_map));
+            page_t* pg = phys_to_page(virt_to_phys(child_p->p_vm_map));
             if (pg) {
                 pg->pg_proc = child_p;
             }
         }
+        // VMA 트리 Clone
+        uint64_t vma_lock_flags = spin_lock_irqsave(&parent_p->p_vma_lock);
+        struct vm_area *vma;
+        vma_for_each(vma, &parent_p->p_vma_list) {
+            struct vm_area *clone = vma_alloc(vma->start, vma->end,
+                                              vma->flags, vma->vn,
+                                              vma->file_offset);
+            if (!clone) {
+                spin_unlock_irqrestore(&parent_p->p_vma_lock, vma_lock_flags);
+                goto err_vm_map;
+            }
+            vma_insert(&child_p->p_vma_root, &child_p->p_vma_list, clone);
+        }
+        spin_unlock_irqrestore(&parent_p->p_vma_lock, vma_lock_flags);
+
         child_p->p_entry = parent_p->p_entry;
         child_p->p_stack_top = parent_p->p_stack_top;
         child_p->p_brk = parent_p->p_brk;
@@ -230,20 +232,7 @@ int64_t sys_clone(uint64_t flags, void *child_stack, void *ptid, void *ctid, uin
 
 int64_t sys_fork(void) {
     if (curthread->t_arch_data) {
-        extern bool g_use_xsave;
-        if (g_use_xsave) {
-            uint32_t eax = 0xFFFFFFFF;
-            uint32_t edx = 0xFFFFFFFF;
-            asm volatile("xsaveq (%0)" 
-                         : 
-                         : "r"(curthread->t_arch_data), "a"(eax), "d"(edx) 
-                         : "memory");
-        } else {
-            asm volatile("fxsave (%0)"
-                         :
-                         : "r"(curthread->t_arch_data)
-                         : "memory");
-        }
+        arch_fpu_save(curthread->t_arch_data);
     }
 
     struct proc *parent_p = curproc;
@@ -281,21 +270,26 @@ int64_t sys_fork(void) {
             goto err_proc;
         }
         if (child_p->p_vm_map) {
-        page_t* pg = phys_to_page(v2p(child_p->p_vm_map));
+        page_t* pg = phys_to_page(virt_to_phys(child_p->p_vm_map));
         if (pg) {
             pg->pg_proc = child_p;
         }
     }
 
     // VMA 트리 Clone
+    uint64_t vma_lock_flags = spin_lock_irqsave(&parent_p->p_vma_lock);
     struct vm_area *vma;
     vma_for_each(vma, &parent_p->p_vma_list) {
         struct vm_area *clone = vma_alloc(vma->start, vma->end,
                                           vma->flags, vma->vn,
                                           vma->file_offset);
-        if (!clone) goto err_proc;
+        if (!clone) {
+            spin_unlock_irqrestore(&parent_p->p_vma_lock, vma_lock_flags);
+            goto err_proc;
+        }
         vma_insert(&child_p->p_vma_root, &child_p->p_vma_list, clone);
     }
+    spin_unlock_irqrestore(&parent_p->p_vma_lock, vma_lock_flags);
     
     extern void shm_fork_copy(struct proc *parent, struct proc *child);
     shm_fork_copy(parent_p, child_p);
@@ -483,6 +477,13 @@ int64_t sys_execve(const char *user_path, char *const argv[], char *const envp[]
     }
 
     dprintf("[sys_execve] load_elf SUCCESS! entry: %p, interpreter_base: %p\n", entry_point, interpreter_base);
+
+    {
+        uint64_t vma_lk = spin_lock_irqsave(&curproc->p_vma_lock);
+        vma_remove_range(&curproc->p_vma_root, &curproc->p_vma_list, 0, ~0ULL);
+        spin_unlock_irqrestore(&curproc->p_vma_lock, vma_lk);
+    }
+
     uintptr_t stack_top = USER_STACK_TOP;
     uintptr_t stack_bottom = USER_STACK_TOP - USER_STACK_SIZE;
 
@@ -521,7 +522,7 @@ int64_t sys_execve(const char *user_path, char *const argv[], char *const envp[]
     page_table_t *old_map = curproc->p_vm_map;
     curproc->p_vm_map = new_map;
     {
-        page_t *pg = phys_to_page(v2p(new_map));
+        page_t *pg = phys_to_page(virt_to_phys(new_map));
         if (pg) pg->pg_proc = curproc;
     }
     curproc->p_entry = entry_point;
@@ -609,74 +610,4 @@ int64_t sys_wait4(pid_t pid, int *user_wstatus, int options, void *user_rusage) 
     }
 }
 
-int64_t sys_getpid(void) {
-    if (curproc && curproc->p_pid > 0) {
-        return curproc->p_pid;
-    }
-    return 1;
-}
 
-struct utsname {
-    char sysname[65];
-    char nodename[65];
-    char release[65];
-    char version[65];
-    char machine[65];
-    char domainname[65];
-};
-
-int64_t sys_uname(void *user_buf) {
-    if (!is_user_address_range(user_buf, sizeof(struct utsname))) {
-        return -EFAULT;
-    }
-
-    struct utsname kbuf;
-    memset(&kbuf, 0, sizeof(struct utsname));
-    strncpy(kbuf.sysname, __kernel_name, 64);
-    strncpy(kbuf.nodename, "mika-qemu", 64);
-    strncpy(kbuf.release, __kernel_release, 64);
-    strncpy(kbuf.version, __kernel_version, 64);
-    strncpy(kbuf.machine, __kernel_machine, 64);
-    strncpy(kbuf.domainname, "mika.local", 64);
-
-    if (copy_to_user(user_buf, &kbuf, sizeof(struct utsname)) < 0) {
-        return -EFAULT;
-    }
-
-    return 0;
-}
-
-int64_t sys_getuid(void) {
-    return 0;
-}
-
-int64_t sys_getgid(void) {
-    return 0;
-}
-
-int64_t sys_geteuid(void) {
-    return 0;
-}
-
-int64_t sys_getegid(void) {
-    return 0;
-}
-
-int64_t sys_lchown(const char *user_path, uid_t owner, gid_t group) {
-    (void)user_path;
-    (void)owner;
-    (void)group;
-    return 0;
-}
-
-int64_t sys_setsid(void) {
-    if (!curproc) return -EINVAL;
-    return curproc->p_pid;
-}
-
-int64_t sys_setresuid(uid_t ruid, uid_t euid, uid_t suid) {
-    (void)ruid;
-    (void)euid;
-    (void)suid;
-    return 0;
-}

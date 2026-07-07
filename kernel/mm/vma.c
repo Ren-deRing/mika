@@ -268,10 +268,10 @@ void vma_insert(struct vm_area **root, struct list_node *head,
         list_add(&vma->vma_list, head);
     } else if (vma->start < y->start) {
         y->rb_left = vma;
-        list_add(&vma->vma_list, &y->vma_list);
+        list_add_tail(&vma->vma_list, &y->vma_list);
     } else {
         y->rb_right = vma;
-        list_add_tail(&vma->vma_list, &y->vma_list);
+        list_add(&vma->vma_list, &y->vma_list);
     }
 
     rb_insert_fixup(root, vma);
@@ -438,12 +438,12 @@ void vma_remove_range(struct vm_area **root, struct list_node *head,
                     if (tail)
                         erase_vma = tail;
                     else
-                        erase_vma = right;
+                        break;
                 } else {
                     erase_vma = right;
                 }
             } else {
-                erase_vma = vma;
+                break;
             }
         } else if (vma->end > end) {
             struct vm_area *right = vma_split(root, head, vma, end);
@@ -505,13 +505,13 @@ uintptr_t vma_resolve_fault(struct proc *p, uintptr_t addr) {
         }
     }
 
-    memset(p2v(phys), 0, PAGE_SIZE);
+    memset(phys_to_virt(phys), 0, PAGE_SIZE);
     if (!vn->ops || !vn->ops->read) {
         page_free(pg, 0);
         vput(vn);
         return 0;
     }
-    int n = vn->ops->read(vn, p2v(phys), PAGE_SIZE, file_offset);
+    int n = vn->ops->read(vn, phys_to_virt(phys), PAGE_SIZE, file_offset);
     if (n < 0) {
         page_free(pg, 0);
         vput(vn);

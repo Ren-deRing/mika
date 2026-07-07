@@ -1,5 +1,7 @@
 #include <kernel/fs/vnode.h>
 #include <kernel/kmem.h>
+#include <kernel/kasan.h>
+#include <kernel/printf.h>
 
 #include <uapi/errno.h>
 
@@ -41,6 +43,8 @@ struct vnode* vnode_alloc(uint32_t type, struct vnode_ops *ops) {
             list_del(&vn->v_hash);
             list_init(&vn->v_hash);
         }
+        list_del(&vn->v_all);
+        list_init(&vn->v_all);
         break;
     }
 
@@ -51,6 +55,7 @@ struct vnode* vnode_alloc(uint32_t type, struct vnode_ops *ops) {
     } else {
         spin_unlock_irqrestore(&vnode_list_lock, flags);
     }
+    kasan_unpoison(vn, sizeof(struct vnode));
 
     memset(vn, 0, sizeof(struct vnode));
     vn->ref_count = 1;
@@ -142,6 +147,8 @@ void vput(struct vnode *vn) {
         if (vn->v_reclaimable) {
             list_add_tail(&vn->v_freelist, &vnode_free_list);
         } else {
+            list_del(&vn->v_all);
+            list_init(&vn->v_all);
             kfree(vn);
         }
         spin_unlock_irqrestore(&vnode_list_lock, flags);

@@ -25,11 +25,11 @@ void acpi_init() {
         return;
     }
 
-    struct xsdt* xsdt = (struct xsdt*)(p2v(rsdp->xsdt_address));
+    struct xsdt* xsdt = (struct xsdt*)(phys_to_virt(rsdp->xsdt_address));
     int entries = (xsdt->header.length - sizeof(struct acpi_sdt_header)) / sizeof(uint64_t);
 
     for (int i = 0; i < entries; i++) {
-        struct acpi_sdt_header* table = (struct acpi_sdt_header*)(p2v(xsdt->tables[i]));
+        struct acpi_sdt_header* table = (struct acpi_sdt_header*)(phys_to_virt(xsdt->tables[i]));
 
         // MADT
         if (memcmp(table->signature, "APIC", 4) == 0) {
@@ -46,14 +46,14 @@ void acpi_init() {
     
             uint64_t val = h->address.address;
             acpi_info.hpet_paddr = (uintptr_t)val;
-            acpi_info.hpet_addr = (uintptr_t)(p2v(val));
+            acpi_info.hpet_addr = (uintptr_t)(phys_to_virt(val));
         }
     }
 }
 
 void madt_init(struct madt* m) {
     acpi_info.lapic_paddr = m->lapic_addr;
-    acpi_info.lapic_addr = (uintptr_t)p2v(m->lapic_addr);
+    acpi_info.lapic_addr = (uintptr_t)phys_to_virt(m->lapic_addr);
 
     uint8_t* ptr = m->entries;
     uint8_t* end = (uint8_t*)m + m->header.length;
@@ -72,7 +72,7 @@ void madt_init(struct madt* m) {
             }
             case 1: { // I/O APIC
                 acpi_info.ioapic_paddr = (uintptr_t)(*(uint32_t*)&ptr[4]);
-                acpi_info.ioapic_addr = (uintptr_t)(p2v(*(uint32_t*)&ptr[4]));
+                acpi_info.ioapic_addr = (uintptr_t)(phys_to_virt(*(uint32_t*)&ptr[4]));
                 break;
             }
             case 2: { // Interrupt Source Override

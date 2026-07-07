@@ -125,7 +125,7 @@ struct proc* proc_create(pid_t pid) {
     }
     
     if (p->p_vm_map) {
-        page_t* pg = phys_to_page(v2p(p->p_vm_map));
+        page_t* pg = phys_to_page(virt_to_phys(p->p_vm_map));
         if (pg) {
             pg->pg_proc = p;
         }

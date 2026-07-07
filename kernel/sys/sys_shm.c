@@ -112,7 +112,7 @@ int64_t sys_shmget(key_t key, size_t size, int shmflg) {
         }
         seg->pages[p] = pg;
         uintptr_t paddr = page_to_phys(pg);
-        memset(p2v(paddr), 0, PAGE_SIZE);
+        memset(phys_to_virt(paddr), 0, PAGE_SIZE);
     }
 
     seg->id = next_shmid++;

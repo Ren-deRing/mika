@@ -21,29 +21,18 @@ int copy_str_from_user(char *dest, const char *user_src, size_t max_len);
 int64_t sys_read(int fd, void *user_buf, size_t count);
 int64_t sys_write(int fd, const void *user_buf, size_t count);
 int64_t sys_open(const char *user_path, int flags, int mode);
-int64_t sys_mkdir(const char *user_path, int mode);
-int64_t sys_unlink(const char *user_path);
-int64_t sys_rename(const char *user_old, const char *user_new);
 int64_t sys_close(int fd);
 int64_t sys_fstat(int fd, void *user_stat);
-int64_t sys_stat(const char *user_path, void *user_stat);
-int64_t sys_lstat(const char *user_path, void *user_stat);
-int64_t sys_readlink(const char *user_path, char *user_buf, size_t user_bufsiz);
-int64_t sys_symlink(const char *user_target, const char *user_linkpath);
 int64_t sys_lseek(int fd, int64_t offset, int whence);
 int64_t sys_ioctl(int fd, uint64_t request, void *arg);
 int64_t sys_readv(int fd, const void *iov, int iovcnt);
 int64_t sys_writev(int fd, const void *iov, int iovcnt);
 int64_t sys_fcntl(int fd, int cmd, uint64_t arg);
 int64_t sys_flock(int fd, int operation);
-int64_t sys_newfstatat(int dfd, const char *path, void *statbuf, int flag);
-int64_t sys_mount(const char *user_source, const char *user_target, const char *user_fstype, uint64_t flags, const void *user_data);
-int64_t sys_access(const char *user_path, int mode);
-int64_t sys_faccessat(int dirfd, const char *user_path, int mode, int flags);
-int64_t sys_faccessat2(int dirfd, const char *user_path, int mode, int flags);
 int64_t sys_pipe(int *user_pipefd);
 int64_t sys_pipe2(int *user_pipefd, int flags);
-int64_t sys_getdents64(int fd, void *user_buf, size_t count);
+int64_t sys_ftruncate(int fd, int64_t length);
+int64_t sys_fallocate(int fd, int mode, int64_t offset, int64_t len);
 int64_t sys_epoll_create1(int flags);
 int64_t sys_epoll_ctl(int epfd, int op, int fd, void *user_event);
 int64_t sys_epoll_wait(int epfd, void *user_events, int maxevents, int timeout);
@@ -56,25 +45,43 @@ int64_t sys_timerfd_create(int clockid, int flags);
 int64_t sys_timerfd_settime(int fd, int flags, const struct itimerspec *new_value, struct itimerspec *old_value);
 int64_t sys_timerfd_gettime(int fd, struct itimerspec *curr_value);
 
+// sys_fs.c
+int64_t sys_mkdir(const char *user_path, int mode);
+int64_t sys_rmdir(const char *user_path);
+int64_t sys_unlink(const char *user_path);
+int64_t sys_rename(const char *user_old, const char *user_new);
+int64_t sys_access(const char *user_path, int mode);
+int64_t sys_faccessat(int dirfd, const char *user_path, int mode, int flags);
+int64_t sys_faccessat2(int dirfd, const char *user_path, int mode, int flags);
+int64_t sys_newfstatat(int dfd, const char *path, void *statbuf, int flag);
+int64_t sys_stat(const char *user_path, void *user_stat);
+int64_t sys_lstat(const char *user_path, void *user_stat);
+int64_t sys_readlink(const char *user_path, char *user_buf, size_t user_bufsiz);
+int64_t sys_symlink(const char *user_target, const char *user_linkpath);
+int64_t sys_mount(const char *user_source, const char *user_target, const char *user_fstype, uint64_t flags, const void *user_data);
+int64_t sys_getdents64(int fd, void *user_buf, size_t count);
+int64_t sys_memfd_create(const char *user_name, unsigned int flags);
+
 // sys_proc.c
+int64_t sys_fork(void);
+int64_t sys_clone(uint64_t flags, void *child_stack, void *ptid, void *ctid, uint64_t newtls);
+int64_t sys_execve(const char *pathname, char *const argv[], char *const envp[]);
+int64_t sys_exit(int status);
+int64_t sys_wait4(pid_t pid, int *wstatus, int options, void *rusage);
+int64_t sys_set_tid_address(int *tidptr);
+
+// sys_getid.c
 int64_t sys_getpid(void);
 int64_t sys_uname(void *user_buf);
 int64_t sys_getuid(void);
 int64_t sys_getgid(void);
 int64_t sys_geteuid(void);
 int64_t sys_getegid(void);
-int64_t sys_fork(void);
-int64_t sys_clone(uint64_t flags, void *child_stack, void *ptid, void *ctid, uint64_t newtls);
 int64_t sys_setsid(void);
 int64_t sys_setresuid(uid_t ruid, uid_t euid, uid_t suid);
 int64_t sys_lchown(const char *user_path, uid_t owner, gid_t group);
-int64_t sys_execve(const char *pathname, char *const argv[], char *const envp[]);
-int64_t sys_exit(int status);
-int64_t sys_wait4(pid_t pid, int *wstatus, int options, void *rusage);
-int64_t sys_set_tid_address(int *tidptr);
-int64_t sys_memfd_create(const char *user_name, unsigned int flags);
 
-// sys_mem.c
+// sys_mmap.c
 int64_t sys_brk(uintptr_t addr);
 int64_t sys_mmap(uintptr_t addr, size_t length, int prot, int flags, int fd, int64_t offset);
 int64_t sys_munmap(void *addr, size_t length);
@@ -90,18 +97,24 @@ int64_t sys_tkill(int tid, int sig);
 int64_t sys_tgkill(int tgid, int tid, int sig);
 void    handle_signal(struct trapframe *tf);
 
-// sys_sync.c
+// sys_futex.c
 int64_t sys_futex(uint32_t *uaddr, int op, uint32_t val, const void *timeout, uint32_t *uaddr2, uint32_t val3);
+
+// sys_timer.c
+int64_t sys_timer_create(int clock_id, const void *sevp, int *timerid);
+int64_t sys_timer_settime(int timerid, int flags, const struct itimerspec *new_value, struct itimerspec *old_value);
+int64_t sys_timer_delete(int timerid);
+void    posix_timers_tick(void);
+
+// sys_time.c
 int64_t sys_time(int64_t *tloc);
 int64_t sys_clock_gettime(int clock_id, void *tp);
 int64_t sys_clock_getres(int clock_id, void *tp);
 int64_t sys_getrlimit(int resource, void *user_rlim);
 int64_t sys_arch_prctl(int code, uint64_t addr);
 int64_t sys_nanosleep(const struct timespec *user_req, struct timespec *user_rem);
-int64_t sys_timer_create(int clock_id, const void *sevp, int *timerid);
-int64_t sys_timer_settime(int timerid, int flags, const struct itimerspec *new_value, struct itimerspec *old_value);
-int64_t sys_timer_delete(int timerid);
-void    posix_timers_tick(void);
+int64_t sys_getrandom(void *buf, size_t buflen, unsigned int flags);
+int64_t sys_membarrier(int cmd, unsigned int flags, int cpu_id);
 
 // sys_shm.c, sys_sem.c
 int64_t sys_shmget(key_t key, size_t size, int shmflg);
@@ -121,12 +134,11 @@ int64_t sys_accept(int fd, void *user_addr, uint32_t *user_addrlen);
 int64_t sys_connect(int fd, const void *user_addr, uint32_t addrlen);
 int64_t sys_sendmsg(int fd, const void *user_msg, int flags);
 int64_t sys_recvmsg(int fd, void *user_msg, int flags);
-int64_t sys_poll(void *user_fds, uint64_t nfds, int timeout);
-int64_t sys_select(int nfds, void *readfds, void *writefds, void *exceptfds, void *timeout, uint64_t sigsetsize);
-int64_t sys_ftruncate(int fd, int64_t length);
 int64_t sys_sendto(int fd, const void *user_buf, size_t len, int flags, const void *user_dest_addr, uint32_t addrlen);
 int64_t sys_recvfrom(int fd, void *user_buf, size_t len, int flags, void *user_src_addr, uint32_t *user_addrlen);
 int64_t sys_setsockopt(int fd, int level, int optname, const void *optval, uint32_t optlen);
-int64_t sys_getrandom(void *buf, size_t buflen, unsigned int flags);
 int64_t sys_accept4(int fd, void *user_addr, uint32_t *user_addrlen, int flags);
-int64_t sys_fallocate(int fd, int mode, int64_t offset, int64_t len);
+
+// sys_poll.c
+int64_t sys_poll(void *user_fds, uint64_t nfds, int timeout);
+int64_t sys_select(int nfds, void *readfds, void *writefds, void *exceptfds, void *timeout, uint64_t sigsetsize);

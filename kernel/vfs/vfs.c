@@ -166,7 +166,7 @@ static const char* vfs_next_component(const char *path, char *out_name) {
 
     int i = 0;
     while (*path && *path != '/') {
-        if (i < 255) out_name[i++] = *path; // NAME_MAX 대충 255 ㅇㅇ
+        if (i < NAME_MAX) out_name[i++] = *path;
         path++;
     }
     out_name[i] = '\0';
@@ -184,7 +184,7 @@ int vfs_lookup_impl(const char *path, struct vnode *base, int follow_last, int d
 
     vref(curr);
 
-    char name[NAME_MAX];
+    char name[NAME_MAX + 1];
     const char *next = path;
 
     while ((next = vfs_next_component(next, name))) {
@@ -495,6 +495,46 @@ int vfs_mkdir(const char *path, mode_t mode) {
 
     if (dvp->ops->mkdir) {
         err = dvp->ops->mkdir(dvp, child_name, mode);
+    } else {
+        err = -ENOTSUP;
+    }
+
+    vput(dvp);
+    return err;
+}
+
+int vfs_rmdir(const char *path) {
+    if (!curthread || !curthread->t_proc) return -ESRCH;
+    struct proc *p = curthread->t_proc;
+
+    char clean_path[256];
+    sanitize_path(path, clean_path, sizeof(clean_path));
+
+    char parent_path[256];
+    char child_name[256];
+
+    const char *last_slash = strrchr(clean_path, '/');
+    if (!last_slash) {
+        strcpy(parent_path, ".");
+        strcpy(child_name, clean_path);
+    } else if (last_slash == clean_path) {
+        strcpy(parent_path, "/");
+        strcpy(child_name, clean_path + 1);
+    } else {
+        size_t len = last_slash - clean_path;
+        strncpy(parent_path, clean_path, len);
+        parent_path[len] = '\0';
+        strcpy(child_name, last_slash + 1);
+    }
+
+    struct vnode *dvp = NULL;
+    int err = vfs_lookup(parent_path, p->p_cwd, &dvp);
+    if (err != 0) return err;
+
+    if (dvp->ops->rmdir) {
+        err = dvp->ops->rmdir(dvp, child_name);
+    } else if (dvp->ops->remove) {
+        err = dvp->ops->remove(dvp, child_name);
     } else {
         err = -ENOTSUP;
     }

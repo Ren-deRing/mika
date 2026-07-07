@@ -144,7 +144,7 @@ void arch_switch_mm(struct proc *prev, struct proc *next) {
     }
 
     if (next->p_vm_map) {
-        uintptr_t next_cr3 = v2p(next->p_vm_map);
+        uintptr_t next_cr3 = virt_to_phys(next->p_vm_map);
         uintptr_t curr_cr3;
         
         asm volatile("mov %%cr3, %0" : "=r"(curr_cr3));

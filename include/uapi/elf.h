@@ -104,6 +104,7 @@ typedef struct {
 #define ELF64_ST_TYPE(i)   ((i) & 0xf)
 
 #define PT_GNU_STACK  0x6474e551
+#define PT_GNU_RELRO  0x6474e552
 
 #define SHT_NULL     0
 #define SHT_PROGBITS 1

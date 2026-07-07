@@ -25,6 +25,13 @@ void mutex_unlock(mutex_t *m);
 
 #define RWLOCK_INITIALIZER { .val = 0 }
 
+#define RWSEM_INITIALIZER(name) { \
+    .wait_lock = SPINLOCK_INITIALIZER, \
+    .count = 0, \
+    .owner = NULL, \
+    .wait_queue = LIST_HEAD_INIT((name).wait_queue), \
+}
+
 static inline void rwlock_init(rwlock_t *lock) {
     lock->val = 0;
 }
@@ -84,3 +91,9 @@ static inline void write_unlock_irqrestore(rwlock_t *lock, uint64_t flags) {
     write_unlock(lock);
     arch_irq_restore(flags);
 }
+
+void rwsem_init(rw_semaphore_t *rwsem);
+void down_read(rw_semaphore_t *rwsem);
+void up_read(rw_semaphore_t *rwsem);
+void down_write(rw_semaphore_t *rwsem);
+void up_write(rw_semaphore_t *rwsem);
