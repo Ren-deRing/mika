@@ -23,6 +23,7 @@ NO_KASAN_PATHS := \
     lib/kprintf.c \
     lib/lock.c \
     misc/kstack.c \
+    misc/softirq.c \
     arch/x86_64/mmu.c \
     arch/x86_64/idt.c \
     arch/x86_64/gdt.c \

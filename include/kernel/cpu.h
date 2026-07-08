@@ -41,6 +41,9 @@ struct cpu {
     kmem_magazine_t* magazines[KMEM_NUM_CLASSES];
 
     struct thread *prev_thread;
+
+    uint64_t softirq_pending;
+    bool     in_softirq;
 };
 
 #if defined(__x86_64__)

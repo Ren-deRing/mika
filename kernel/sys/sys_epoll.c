@@ -35,7 +35,7 @@
 extern struct vnode_ops unix_socket_ops;
 
 uint32_t check_fd_readiness(int fd, uint32_t events) {
-    struct file *f = curproc->p_fd_table[fd];
+    struct file *f = fdget(fd);
     if (!f) return POLLNVAL;
 
     uint32_t revents = 0;
@@ -107,6 +107,7 @@ uint32_t check_fd_readiness(int fd, uint32_t events) {
         revents |= (events & (POLLIN | POLLOUT));
     }
 
+    fdput(f);
     return revents;
 }
 
@@ -168,27 +169,26 @@ int64_t sys_epoll_create1(int flags) {
         file_close(f);
         return fd;
     }
+    file_close(f);
 
     return fd;
 }
 
 int64_t sys_epoll_ctl(int epfd, int op, int fd, void *user_event) {
-    if (epfd < 0 || epfd >= MAX_FILES) return -EBADF;
-    if (fd < 0 || fd >= MAX_FILES) return -EBADF;
+    struct file *epf = fdget(epfd);
+    if (!epf) return -EBADF;
+    if (!epf->f_vn || epf->f_vn->ops != &epoll_ops) { fdput(epf); return -EINVAL; }
 
-    struct file *epf = curproc->p_fd_table[epfd];
-    if (!epf || !epf->f_vn || epf->f_vn->ops != &epoll_ops) return -EINVAL;
-
-    struct file *target_f = curproc->p_fd_table[fd];
-    if (!target_f) return -EBADF;
+    struct file *target_f = fdget(fd);
+    if (!target_f) { fdput(epf); return -EBADF; }
 
     struct epoll_instance *ei = (struct epoll_instance *)epf->f_vn->data;
-    if (!ei) return -EINVAL;
+    if (!ei) { fdput(epf); fdput(target_f); return -EINVAL; }
 
     struct epoll_event ev;
     if (op == EPOLL_CTL_ADD || op == EPOLL_CTL_MOD) {
-        if (!is_user_address_range(user_event, sizeof(struct epoll_event))) return -EFAULT;
-        if (copy_from_user(&ev, user_event, sizeof(struct epoll_event)) < 0) return -EFAULT;
+        if (!is_user_address_range(user_event, sizeof(struct epoll_event))) { fdput(epf); fdput(target_f); return -EFAULT; }
+        if (copy_from_user(&ev, user_event, sizeof(struct epoll_event)) < 0) { fdput(epf); fdput(target_f); return -EFAULT; }
     }
 
     spin_lock(&ei->lock);
@@ -197,11 +197,13 @@ int64_t sys_epoll_ctl(int epfd, int op, int fd, void *user_event) {
         for (int i = 0; i < ei->count; i++) {
             if (ei->items[i].fd == fd) {
                 spin_unlock(&ei->lock);
+                fdput(epf); fdput(target_f);
                 return -EEXIST;
             }
         }
         if (ei->count >= MAX_EPOLL_ITEMS) {
             spin_unlock(&ei->lock);
+            fdput(epf); fdput(target_f);
             return -ENOMEM;
         }
         ei->items[ei->count].fd = fd;
@@ -217,6 +219,7 @@ int64_t sys_epoll_ctl(int epfd, int op, int fd, void *user_event) {
         }
         if (found < 0) {
             spin_unlock(&ei->lock);
+            fdput(epf); fdput(target_f);
             return -ENOENT;
         }
         ei->items[found].event = ev;
@@ -230,6 +233,7 @@ int64_t sys_epoll_ctl(int epfd, int op, int fd, void *user_event) {
         }
         if (found < 0) {
             spin_unlock(&ei->lock);
+            fdput(epf); fdput(target_f);
             return -ENOENT;
         }
         for (int i = found; i < ei->count - 1; i++) {
@@ -238,26 +242,27 @@ int64_t sys_epoll_ctl(int epfd, int op, int fd, void *user_event) {
         ei->count--;
     } else {
         spin_unlock(&ei->lock);
+        fdput(epf); fdput(target_f);
         return -EINVAL;
     }
 
     spin_unlock(&ei->lock);
+    fdput(epf); fdput(target_f);
     return 0;
 }
 
 int64_t sys_epoll_wait(int epfd, void *user_events, int maxevents, int timeout) {
-    if (epfd < 0 || epfd >= MAX_FILES) return -EBADF;
     if (maxevents <= 0) return -EINVAL;
     if (!is_user_address_range(user_events, sizeof(struct epoll_event) * maxevents)) return -EFAULT;
 
-    struct file *epf = curproc->p_fd_table[epfd];
-    if (!epf || !epf->f_vn || epf->f_vn->ops != &epoll_ops) return -EINVAL;
+    struct file *epf = fdget(epfd);
+    if (!epf || !epf->f_vn || epf->f_vn->ops != &epoll_ops) { fdput(epf); return -EINVAL; }
 
     struct epoll_instance *ei = (struct epoll_instance *)epf->f_vn->data;
-    if (!ei) return -EINVAL;
+    if (!ei) { fdput(epf); return -EINVAL; }
 
     struct epoll_event *events = kmalloc(sizeof(struct epoll_event) * maxevents);
-    if (!events) return -ENOMEM;
+    if (!events) { fdput(epf); return -ENOMEM; }
 
     int ready_count = 0;
     uint64_t deadline = (timeout > 0) ? get_uptime_ns() + (uint64_t)timeout * 1000000 : 0;
@@ -296,11 +301,13 @@ int64_t sys_epoll_wait(int epfd, void *user_events, int maxevents, int timeout) 
     if (ready_count > 0) {
         if (copy_to_user(user_events, events, sizeof(struct epoll_event) * ready_count) < 0) {
             kfree(events);
+            fdput(epf);
             return -EFAULT;
         }
     }
 
     kfree(events);
+    fdput(epf);
     return ready_count;
 }
 

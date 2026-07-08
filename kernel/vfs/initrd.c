@@ -139,9 +139,8 @@ void vfs_load_initrd(uintptr_t addr, uint64_t size) {
             if (r != 0) {
                 dprintf("[INITRD] Failed to create file %s, error: %d\n", path, r);
             } else {
-                struct proc *p = curproc;
-                if (p && fd >= 0 && fd < MAX_FILES && p->p_fd_table[fd]) {
-                    struct file *f = p->p_fd_table[fd];
+                struct file *f = fdget(fd);
+                if (f) {
                     struct vnode *vp = f->f_vn;
                     if (vp && vp->data) {
                         struct ramfs_node *node = (struct ramfs_node *)vp->data;
@@ -149,6 +148,7 @@ void vfs_load_initrd(uintptr_t addr, uint64_t size) {
                         node->size = filesize;
                         node->is_static_buf = 1;
                     }
+                    fdput(f);
                 }
                 vfs_close(fd);
             }

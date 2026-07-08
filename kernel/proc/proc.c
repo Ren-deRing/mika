@@ -147,9 +147,10 @@ struct proc* proc_create(pid_t pid) {
 int proc_alloc_fd(struct proc *p, struct file *f) {
     if (!p || !f) return -EINVAL;
 
-    spin_lock(&p->p_lock); // 락 획득
+    spin_lock(&p->p_lock);
     for (int i = 0; i < MAX_FILES; i++) {
         if (p->p_fd_table[i] == NULL) {
+            file_ref(f);
             p->p_fd_table[i] = f;
             spin_unlock(&p->p_lock);
             return i;
@@ -157,7 +158,7 @@ int proc_alloc_fd(struct proc *p, struct file *f) {
     }
     spin_unlock(&p->p_lock);
 
-    return -EMFILE; // 빈자리가 없음!!
+    return -EMFILE;
 }
 
 void proc_ref(struct proc *p) {

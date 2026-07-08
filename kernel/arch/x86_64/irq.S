@@ -1,6 +1,7 @@
 .global isr_common_stub
 .extern isr_handler
 .extern mi_switch
+.extern do_softirq
 
 #include "build/gen/asm_defines.h"
 
@@ -102,6 +103,11 @@ isr_common_stub:
 .skip_tf_update:
     movq %rsp, %rdi
     call isr_handler
+
+    sti
+    movq %rsp, %rdi
+    call do_softirq
+    cli
 
     movq %gs:0, %rax
     testq %rax, %rax

@@ -47,11 +47,7 @@ struct pollfd {
 
 static void poll_check_fd(struct pollfd *fds, int i) {
     int fd = fds[i].fd;
-    if (fd < 0 || fd >= MAX_FILES) {
-        fds[i].revents |= POLLNVAL;
-        return;
-    }
-    struct file *f = curproc->p_fd_table[fd];
+    struct file *f = fdget(fd);
     if (!f) {
         fds[i].revents |= POLLNVAL;
         return;
@@ -94,6 +90,7 @@ static void poll_check_fd(struct pollfd *fds, int i) {
 
     if (fds[i].revents & fds[i].events)
         fds[i].revents = fds[i].revents & fds[i].events;
+    fdput(f);
 }
 
 static int do_poll(struct pollfd *fds, int nfds, int timeout_ms) {

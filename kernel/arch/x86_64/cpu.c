@@ -4,6 +4,7 @@
 #include <kernel/sched.h>
 #include <kernel/intc.h>
 #include <kernel/mmu.h>
+#include <kernel/softirq.h>
 
 #include <uapi/types.h>
 #include <uapi/errno.h>
@@ -61,9 +62,8 @@ void arch_timer_handler(struct trapframe *regs, void *data) {
     if (curcpu->id == 0) {
         g_ticks++;
     }
-    
-    sched_tick();
 
+    raise_softirq(TIMER_SOFTIRQ);
     g_intc->eoi(); 
 }
 

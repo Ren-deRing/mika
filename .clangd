@@ -1,0 +1,12 @@
+CompileFlags:
+  Add: [
+    "-I.",
+    "-Ilib",
+    "-Iinclude",
+    "-Ikernel",
+    "-Imusl/build_out/include",
+    "-D__x86_64__",
+    "-D__ELF__",
+    "-std=gnu11"
+  ]
+  Compiler: /usr/bin/clang

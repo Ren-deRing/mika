@@ -132,21 +132,20 @@ int64_t sys_mmap(uintptr_t addr, size_t length, int prot, int flags, int fd, int
 
     if (length == 0) return -EINVAL;
 
-    if (fd >= 0 && fd < MAX_FILES) {
-        struct file *f = curproc->p_fd_table[fd];
-        if (f && f->f_vn && (strcmp(f->f_vn->v_name, "fb0") == 0 || strcmp(f->f_vn->v_name, "card0") == 0)) {
-            size_t fb_size = g_boot_info.fb.pitch * g_boot_info.fb.height;
-            size_t aligned_fb_len = ALIGN_UP(fb_size, PAGE_SIZE);
+    struct file *f = (fd >= 0) ? fdget(fd) : NULL;
+    if (f && f->f_vn && (strcmp(f->f_vn->v_name, "fb0") == 0 || strcmp(f->f_vn->v_name, "card0") == 0)) {
+        size_t fb_size = g_boot_info.fb.pitch * g_boot_info.fb.height;
+        size_t aligned_fb_len = ALIGN_UP(fb_size, PAGE_SIZE);
 
-            if (length > aligned_fb_len) length = aligned_fb_len;
+        if (length > aligned_fb_len) length = aligned_fb_len;
 
-            uintptr_t start = ALIGN_DOWN(addr, PAGE_SIZE);
-            if (addr == 0) {
-                addr = 0x500000000000;
-                while (1) {
-                    bool range_free = true;
-                    for (uintptr_t off = 0; off < aligned_fb_len; off += PAGE_SIZE) {
-                        if (mmu_is_mapped(curproc->p_vm_map, addr + off)) {
+        uintptr_t start = ALIGN_DOWN(addr, PAGE_SIZE);
+        if (addr == 0) {
+            addr = 0x500000000000;
+            while (1) {
+                bool range_free = true;
+                for (uintptr_t off = 0; off < aligned_fb_len; off += PAGE_SIZE) {
+                    if (mmu_is_mapped(curproc->p_vm_map, addr + off)) {
                             range_free = false;
                             addr = ALIGN_UP(addr + off + PAGE_SIZE, PAGE_SIZE);
                             break;
@@ -165,12 +164,14 @@ int64_t sys_mmap(uintptr_t addr, size_t length, int prot, int flags, int fd, int
             for (uintptr_t i = 0; i < aligned_fb_len; i += PAGE_SIZE) {
                 uint32_t mmu_flags = MMU_FLAGS_USER | MMU_FLAGS_WRITE | MMU_FLAGS_READ | MMU_FLAGS_SHARED | MMU_FLAGS_NOCACHE;
                 if (!mmu_map_4k(curproc->p_vm_map, start + i, phys_fb + i, mmu_flags)) {
+                    fdput(f);
                     return -ENOMEM;
                 }
             }
+            fdput(f);
             return start;
         }
-    }
+    fdput(f);
 
     bool map_fixed = (flags & 0x10); // MAP_FIXED
     size_t aligned_len = ALIGN_UP(length, PAGE_SIZE);
@@ -275,14 +276,13 @@ int64_t sys_mmap(uintptr_t addr, size_t length, int prot, int flags, int fd, int
 
     struct vnode *mapped_vn = NULL;
 
-    if (fd >= 0 && fd < MAX_FILES) {
-        uint64_t proc_flags = spin_lock_irqsave(&curproc->p_lock);
-        struct file *f = curproc->p_fd_table[fd];
-        if (f && f->f_vn) {
-            mapped_vn = f->f_vn;
+    if (fd >= 0) {
+        struct file *f_file = fdget(fd);
+        if (f_file && f_file->f_vn) {
+            mapped_vn = f_file->f_vn;
             vref(mapped_vn);
         }
-        spin_unlock_irqrestore(&curproc->p_lock, proc_flags);
+        fdput(f_file);
     }
 
     uint32_t mmu_flags = MMU_FLAGS_USER;

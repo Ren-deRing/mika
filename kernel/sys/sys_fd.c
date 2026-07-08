@@ -148,6 +148,7 @@ int64_t sys_eventfd2(unsigned int initval, int flags) {
         file_close(f);
         return fd;
     }
+    file_close(f);
 
     return fd;
 }
@@ -303,20 +304,22 @@ int64_t sys_signalfd4(int fd, const sigset_t *user_mask, size_t sizemask, int fl
             file_close(f);
             return new_fd;
         }
+        file_close(f);
         return new_fd;
     } else {
-        if (fd < 0 || fd >= MAX_FILES) return -EBADF;
-        struct file *f = curproc->p_fd_table[fd];
-        if (!f || !f->f_vn || f->f_vn->ops != &signalfd_ops) return -EINVAL;
+        struct file *f = fdget(fd);
+        if (!f) return -EBADF;
+        if (!f->f_vn || f->f_vn->ops != &signalfd_ops) { fdput(f); return -EINVAL; }
 
         struct signalfd_buffer *sb = (struct signalfd_buffer *)f->f_vn->data;
-        if (!sb) return -EINVAL;
+        if (!sb) { fdput(f); return -EINVAL; }
 
         spin_lock(&sb->lock);
         sb->mask = mask;
         sb->flags = flags;
         spin_unlock(&sb->lock);
 
+        fdput(f);
         return fd;
     }
 }
@@ -449,20 +452,21 @@ int64_t sys_timerfd_create(int clockid, int flags) {
         file_close(f);
         return fd;
     }
+    file_close(f);
     return fd;
 }
 
 int64_t sys_timerfd_settime(int fd, int flags, const struct itimerspec *user_new_value, struct itimerspec *user_old_value) {
-    if (fd < 0 || fd >= MAX_FILES) return -EBADF;
-    struct file *f = curproc->p_fd_table[fd];
-    if (!f || !f->f_vn || f->f_vn->ops != &timerfd_ops) return -EINVAL;
+    struct file *f = fdget(fd);
+    if (!f) return -EBADF;
+    if (!f->f_vn || f->f_vn->ops != &timerfd_ops) { fdput(f); return -EINVAL; }
 
     struct timerfd_buffer *tb = (struct timerfd_buffer *)f->f_vn->data;
-    if (!tb) return -EINVAL;
+    if (!tb) { fdput(f); return -EINVAL; }
 
     struct itimerspec new_val;
-    if (!is_user_address_range(user_new_value, sizeof(struct itimerspec))) return -EFAULT;
-    if (copy_from_user(&new_val, user_new_value, sizeof(struct itimerspec)) < 0) return -EFAULT;
+    if (!is_user_address_range(user_new_value, sizeof(struct itimerspec))) { fdput(f); return -EFAULT; }
+    if (copy_from_user(&new_val, user_new_value, sizeof(struct itimerspec)) < 0) { fdput(f); return -EFAULT; }
 
     spin_lock(&tb->lock);
 
@@ -472,8 +476,8 @@ int64_t sys_timerfd_settime(int fd, int flags, const struct itimerspec *user_new
     if (user_old_value) {
         struct itimerspec old_val = tb->value;
         spin_unlock(&tb->lock);
-        if (!is_user_address_range(user_old_value, sizeof(struct itimerspec))) return -EFAULT;
-        if (copy_to_user(user_old_value, &old_val, sizeof(struct itimerspec)) < 0) return -EFAULT;
+        if (!is_user_address_range(user_old_value, sizeof(struct itimerspec))) { fdput(f); return -EFAULT; }
+        if (copy_to_user(user_old_value, &old_val, sizeof(struct itimerspec)) < 0) { fdput(f); return -EFAULT; }
         spin_lock(&tb->lock);
     }
 
@@ -497,16 +501,17 @@ int64_t sys_timerfd_settime(int fd, int flags, const struct itimerspec *user_new
     }
 
     spin_unlock(&tb->lock);
+    fdput(f);
     return 0;
 }
 
 int64_t sys_timerfd_gettime(int fd, struct itimerspec *user_curr_value) {
-    if (fd < 0 || fd >= MAX_FILES) return -EBADF;
-    struct file *f = curproc->p_fd_table[fd];
-    if (!f || !f->f_vn || f->f_vn->ops != &timerfd_ops) return -EINVAL;
+    struct file *f = fdget(fd);
+    if (!f) return -EBADF;
+    if (!f->f_vn || f->f_vn->ops != &timerfd_ops) { fdput(f); return -EINVAL; }
 
     struct timerfd_buffer *tb = (struct timerfd_buffer *)f->f_vn->data;
-    if (!tb) return -EINVAL;
+    if (!tb) { fdput(f); return -EINVAL; }
 
     spin_lock(&tb->lock);
     uint64_t now_ns = get_uptime_ns();
@@ -528,7 +533,8 @@ int64_t sys_timerfd_gettime(int fd, struct itimerspec *user_curr_value) {
     }
     spin_unlock(&tb->lock);
 
-    if (!is_user_address_range(user_curr_value, sizeof(struct itimerspec))) return -EFAULT;
-    if (copy_to_user(user_curr_value, &curr_val, sizeof(struct itimerspec)) < 0) return -EFAULT;
+    if (!is_user_address_range(user_curr_value, sizeof(struct itimerspec))) { fdput(f); return -EFAULT; }
+    if (copy_to_user(user_curr_value, &curr_val, sizeof(struct itimerspec)) < 0) { fdput(f); return -EFAULT; }
+    fdput(f);
     return 0;
 }

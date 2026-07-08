@@ -337,6 +337,7 @@ err_stack:
 err_thread:
     kfree_aligned(child_t);
 err_vm_map:
+    vma_remove_range(&child_p->p_vma_root, &child_p->p_vma_list, 0, ~0ULL);
     mmu_destroy_map(child_p->p_vm_map);
     child_p->p_vm_map = NULL;
 err_proc:
@@ -498,6 +499,11 @@ int64_t sys_execve(const char *user_path, char *const argv[], char *const envp[]
     uintptr_t final_user_rsp = setup_user_stack(new_map, USER_STACK_TOP, argv, envp, phdr_vaddr, phnum, interpreter_base, original_entry);
     if (final_user_rsp == 0 || (final_user_rsp % 16) != 0) {
         dprintf("setup_user_stack FAILED. Misaligned RSP: %p\n", final_user_rsp);
+        if (stack_vma) {
+            uint64_t vma_lk = spin_lock_irqsave(&curproc->p_vma_lock);
+            vma_remove_range(&curproc->p_vma_root, &curproc->p_vma_list, stack_bottom, stack_top);
+            spin_unlock_irqrestore(&curproc->p_vma_lock, vma_lk);
+        }
         mmu_destroy_map(new_map);
         return -EFAULT;
     }

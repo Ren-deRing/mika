@@ -95,9 +95,10 @@ int64_t sys_setsockopt(int fd, int level, int optname, const void *optval, uint3
     (void)optname;
     (void)optval;
     (void)optlen;
-    if (fd < 0 || fd >= MAX_FILES) return -EBADF;
-    struct file *f = curproc->p_fd_table[fd];
-    if (!f || !f->f_vn) return -ENOTSOCK;
+    struct file *f = fdget(fd);
+    if (!f) return -EBADF;
+    if (!f->f_vn) { fdput(f); return -ENOTSOCK; }
+    fdput(f);
     return 0;
 }
 
@@ -201,16 +202,14 @@ static ssize_t sock_read_internal(struct vnode *vp, void *buf, size_t n, bool no
 static ssize_t sock_read(struct vnode *vp, void *buf, size_t n, off_t off) {
     (void)off;
     bool nonblock = false;
-    struct proc *p = curproc;
-    if (p) {
-        for (int i = 0; i < MAX_FILES; i++) {
-            struct file *f = p->p_fd_table[i];
-            if (f && f->f_vn == vp) {
-                if (f->f_flags & O_NONBLOCK) {
-                    nonblock = true;
-                    break;
-                }
+    for (int i = 0; i < MAX_FILES; i++) {
+        struct file *f = fdget(i);
+        if (f) {
+            if (f->f_vn == vp && (f->f_flags & O_NONBLOCK)) {
+                nonblock = true;
             }
+            fdput(f);
+            if (nonblock) break;
         }
     }
     return sock_read_internal(vp, buf, n, nonblock);
@@ -324,6 +323,7 @@ int64_t sys_socket(int domain, int type, int protocol) {
             file_close(f);
             return fd;
         }
+        file_close(f);
 
         return fd;
     }
@@ -344,7 +344,6 @@ int64_t sys_socket(int domain, int type, int protocol) {
     struct file *f = file_alloc();
     if (!f) {
         vput(vn);
-        sock_free(s);
         return -ENOMEM;
     }
     f->f_vn = vn;
@@ -361,45 +360,48 @@ int64_t sys_socket(int domain, int type, int protocol) {
         file_close(f);
         return fd;
     }
+    file_close(f);
 
     return fd;
 }
 
 
 int64_t sys_bind(int fd, const void *user_addr, uint32_t addrlen) {
-    if (fd < 0 || fd >= MAX_FILES) return -EBADF;
-    struct file *f = curproc->p_fd_table[fd];
-    if (!f || !f->f_vn) return -ENOTSOCK;
+    struct file *f = fdget(fd);
+    if (!f) return -EBADF;
+    if (!f->f_vn) { fdput(f); return -ENOTSOCK; }
 
     if (f->f_vn->ops == &netlink_socket_ops) {
         struct netlink_socket *ns = (struct netlink_socket *)f->f_vn->data;
-        if (!ns) return -EINVAL;
+        if (!ns) { fdput(f); return -EINVAL; }
         struct sockaddr_nl addr;
         if (addrlen > sizeof(struct sockaddr_nl)) addrlen = sizeof(struct sockaddr_nl);
-        if (copy_from_user(&addr, user_addr, addrlen) < 0) return -EFAULT;
-        if (addr.nl_family != AF_NETLINK) return -EAFNOSUPPORT;
+        if (copy_from_user(&addr, user_addr, addrlen) < 0) { fdput(f); return -EFAULT; }
+        if (addr.nl_family != AF_NETLINK) { fdput(f); return -EAFNOSUPPORT; }
 
         spin_lock(&ns->lock);
         ns->bound_group = addr.nl_groups;
         spin_unlock(&ns->lock);
+        fdput(f);
         return 0;
     }
 
-    if (f->f_vn->ops != &unix_socket_ops) return -ENOTSOCK;
+    if (f->f_vn->ops != &unix_socket_ops) { fdput(f); return -ENOTSOCK; }
 
     struct unix_socket *s = (struct unix_socket *)f->f_vn->data;
-    if (!s) return -EINVAL;
+    if (!s) { fdput(f); return -EINVAL; }
 
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
     if (addrlen > sizeof(struct sockaddr_un)) addrlen = sizeof(struct sockaddr_un);
-    if (copy_from_user(&addr, user_addr, addrlen) < 0) return -EFAULT;
+    if (copy_from_user(&addr, user_addr, addrlen) < 0) { fdput(f); return -EFAULT; }
 
-    if (addr.sun_family != AF_UNIX) return -EAFNOSUPPORT;
+    if (addr.sun_family != AF_UNIX) { fdput(f); return -EAFNOSUPPORT; }
 
     spin_lock(&s->lock);
     if (s->state != SS_CLOSED) {
         spin_unlock(&s->lock);
+        fdput(f);
         return -EINVAL;
     }
 
@@ -414,6 +416,7 @@ int64_t sys_bind(int fd, const void *user_addr, uint32_t addrlen) {
     for (int i = 0; i < MAX_BOUND_SOCKETS; i++) {
         if (bound_sockets[i] && strcmp(bound_sockets[i]->path, s->path) == 0) {
             spin_unlock(&bound_sockets_lock);
+            fdput(f);
             return -EADDRINUSE;
         }
         if (!bound_sockets[i] && slot == -1) {
@@ -423,27 +426,30 @@ int64_t sys_bind(int fd, const void *user_addr, uint32_t addrlen) {
 
     if (slot == -1) {
         spin_unlock(&bound_sockets_lock);
+        fdput(f);
         return -ENOMEM;
     }
 
     bound_sockets[slot] = s;
     spin_unlock(&bound_sockets_lock);
 
+    fdput(f);
     return 0;
 }
 
 
 int64_t sys_listen(int fd, int backlog) {
-    if (fd < 0 || fd >= MAX_FILES) return -EBADF;
-    struct file *f = curproc->p_fd_table[fd];
-    if (!f || !f->f_vn || f->f_vn->ops != &unix_socket_ops) return -ENOTSOCK;
+    struct file *f = fdget(fd);
+    if (!f) return -EBADF;
+    if (!f->f_vn || f->f_vn->ops != &unix_socket_ops) { fdput(f); return -ENOTSOCK; }
 
     struct unix_socket *s = (struct unix_socket *)f->f_vn->data;
-    if (!s) return -EINVAL;
+    if (!s) { fdput(f); return -EINVAL; }
 
     spin_lock(&s->lock);
     if (s->state != SS_BOUND) {
         spin_unlock(&s->lock);
+        fdput(f);
         return -EINVAL;
     }
 
@@ -453,21 +459,23 @@ int64_t sys_listen(int fd, int backlog) {
     (void)backlog;
     spin_unlock(&s->lock);
 
+    fdput(f);
     return 0;
 }
 
 
 int64_t sys_accept(int fd, void *user_addr, uint32_t *user_addrlen) {
-    if (fd < 0 || fd >= MAX_FILES) return -EBADF;
-    struct file *f = curproc->p_fd_table[fd];
-    if (!f || !f->f_vn || f->f_vn->ops != &unix_socket_ops) return -ENOTSOCK;
+    struct file *f = fdget(fd);
+    if (!f) return -EBADF;
+    if (!f->f_vn || f->f_vn->ops != &unix_socket_ops) { fdput(f); return -ENOTSOCK; }
 
     struct unix_socket *s = (struct unix_socket *)f->f_vn->data;
-    if (!s) return -EINVAL;
+    if (!s) { fdput(f); return -EINVAL; }
 
     spin_lock(&s->lock);
     if (s->state != SS_LISTENING) {
         spin_unlock(&s->lock);
+        fdput(f);
         return -EINVAL;
     }
 
@@ -475,6 +483,7 @@ int64_t sys_accept(int fd, void *user_addr, uint32_t *user_addrlen) {
     if (s->backlog_head == s->backlog_tail) {
         if (f->f_flags & O_NONBLOCK) {
             spin_unlock(&s->lock);
+            fdput(f);
             return -EAGAIN;
         }
         while (s->backlog_head == s->backlog_tail) {
@@ -483,6 +492,7 @@ int64_t sys_accept(int fd, void *user_addr, uint32_t *user_addrlen) {
             spin_lock(&s->lock);
             if (s->state != SS_LISTENING) {
                 spin_unlock(&s->lock);
+                fdput(f);
                 return -EINVAL;
             }
         }
@@ -520,7 +530,6 @@ int64_t sys_accept(int fd, void *user_addr, uint32_t *user_addrlen) {
     struct file *chan_file = file_alloc();
     if (!chan_file) {
         vput(vn);
-        sock_free(server_chan);
         return -ENOMEM;
     }
     chan_file->f_vn = vn;
@@ -529,8 +538,10 @@ int64_t sys_accept(int fd, void *user_addr, uint32_t *user_addrlen) {
     int new_fd = proc_alloc_fd(curproc, chan_file);
     if (new_fd < 0) {
         file_close(chan_file);
+        fdput(f);
         return new_fd;
     }
+    file_close(chan_file);
 
     
     if (user_addr && user_addrlen) {
@@ -543,24 +554,25 @@ int64_t sys_accept(int fd, void *user_addr, uint32_t *user_addrlen) {
         copy_to_user(user_addrlen, &len, sizeof(uint32_t));
     }
 
+    fdput(f);
     return new_fd;
 }
 
 
 int64_t sys_connect(int fd, const void *user_addr, uint32_t addrlen) {
-    if (fd < 0 || fd >= MAX_FILES) return -EBADF;
-    struct file *f = curproc->p_fd_table[fd];
-    if (!f || !f->f_vn || f->f_vn->ops != &unix_socket_ops) return -ENOTSOCK;
+    struct file *f = fdget(fd);
+    if (!f) return -EBADF;
+    if (!f->f_vn || f->f_vn->ops != &unix_socket_ops) { fdput(f); return -ENOTSOCK; }
 
     struct unix_socket *s = (struct unix_socket *)f->f_vn->data;
-    if (!s) return -EINVAL;
+    if (!s) { fdput(f); return -EINVAL; }
 
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
     if (addrlen > sizeof(struct sockaddr_un)) addrlen = sizeof(struct sockaddr_un);
-    if (copy_from_user(&addr, user_addr, addrlen) < 0) return -EFAULT;
+    if (copy_from_user(&addr, user_addr, addrlen) < 0) { fdput(f); return -EFAULT; }
 
-    if (addr.sun_family != AF_UNIX) return -EAFNOSUPPORT;
+    if (addr.sun_family != AF_UNIX) { fdput(f); return -EAFNOSUPPORT; }
 
     
     struct unix_socket *server = NULL;
@@ -583,6 +595,7 @@ int64_t sys_connect(int fd, const void *user_addr, uint32_t addrlen) {
             }
         }
         spin_unlock(&bound_sockets_lock);
+        fdput(f);
         return -ECONNREFUSED;
     }
 
@@ -590,6 +603,7 @@ int64_t sys_connect(int fd, const void *user_addr, uint32_t addrlen) {
     if (server->state != SS_LISTENING) {
         dprintf("[sys_connect] Connection refused: server socket is not listening (state: %d)\n", server->state);
         spin_unlock(&server->lock);
+        fdput(f);
         return -ECONNREFUSED;
     }
 
@@ -597,6 +611,7 @@ int64_t sys_connect(int fd, const void *user_addr, uint32_t addrlen) {
     uint32_t next_tail = (server->backlog_tail + 1) % UNIX_SOCKET_MAX_BACKLOG;
     if (next_tail == (uint32_t)server->backlog_head) {
         spin_unlock(&server->lock);
+        fdput(f);
         return -ECONNREFUSED;
     }
 
@@ -611,11 +626,13 @@ int64_t sys_connect(int fd, const void *user_addr, uint32_t addrlen) {
         spin_lock(&s->lock);
         if (s->state == SS_DISCONNECTED) {
             spin_unlock(&s->lock);
+            fdput(f);
             return -ECONNREFUSED;
         }
     }
     spin_unlock(&s->lock);
 
+    fdput(f);
     return 0;
 }
 
@@ -664,11 +681,8 @@ int64_t sys_sendmsg(int fd, const void *user_msg, int flags) {
                 int local_nf = 0;
                 for (int i = 0; i < local_n; i++) {
                     int passed_fd = local_fds[i];
-                    if (passed_fd >= 0 && passed_fd < MAX_FILES) {
-                        uint64_t _pflags = spin_lock_irqsave(&curproc->p_lock);
-                        struct file *pf = curproc->p_fd_table[passed_fd];
-                        if (pf) __atomic_fetch_add(&pf->f_refcnt, 1, __ATOMIC_SEQ_CST);
-                        spin_unlock_irqrestore(&curproc->p_lock, _pflags);
+                    struct file *pf = fdget(passed_fd);
+                    if (pf) {
                         local_files[local_nf++] = pf;
                     }
                 }
@@ -824,9 +838,8 @@ int64_t sys_recvmsg(int fd, void *user_msg, int flags) {
                 int new_fd = proc_alloc_fd(curproc, extracted_files[i]);
                 if (new_fd >= 0) {
                     new_fds[passed_cnt++] = new_fd;
-                } else {
-                    file_close(extracted_files[i]);
                 }
+                file_close(extracted_files[i]);
             }
 
             for (int i = 0; i < passed_cnt; i++) {
@@ -852,13 +865,13 @@ int64_t sys_sendto(int fd, const void *user_buf, size_t len, int flags, const vo
     (void)user_dest_addr;
     (void)addrlen;
 
-    if (fd < 0 || fd >= MAX_FILES) return -EBADF;
-    struct file *f = curproc->p_fd_table[fd];
-    if (!f || !f->f_vn) return -ENOTSOCK;
-    if (f->f_vn->ops == &netlink_socket_ops) return -EINVAL;
-    if (f->f_vn->ops != &unix_socket_ops) return -ENOTSOCK;
+    struct file *f = fdget(fd);
+    if (!f) return -EBADF;
+    if (!f->f_vn) { fdput(f); return -ENOTSOCK; }
+    if (f->f_vn->ops == &netlink_socket_ops) { fdput(f); return -EINVAL; }
+    if (f->f_vn->ops != &unix_socket_ops) { fdput(f); return -ENOTSOCK; }
 
-    if (len == 0) return 0;
+    if (len == 0) { fdput(f); return 0; }
 
     size_t total_written = 0;
     char chunk[4096];
@@ -867,11 +880,13 @@ int64_t sys_sendto(int fd, const void *user_buf, size_t len, int flags, const vo
         if (to_write > sizeof(chunk)) to_write = sizeof(chunk);
 
         if (copy_from_user(chunk, (const char *)user_buf + total_written, to_write) < 0) {
+            fdput(f);
             return total_written > 0 ? (int64_t)total_written : -EFAULT;
         }
 
         ssize_t ret = sock_write(f->f_vn, chunk, to_write, 0);
         if (ret < 0) {
+            fdput(f);
             return total_written > 0 ? (int64_t)total_written : ret;
         }
         total_written += ret;
@@ -880,6 +895,7 @@ int64_t sys_sendto(int fd, const void *user_buf, size_t len, int flags, const vo
         }
     }
 
+    fdput(f);
     return (int64_t)total_written;
 }
 
@@ -888,13 +904,13 @@ int64_t sys_recvfrom(int fd, void *user_buf, size_t len, int flags, void *user_s
     (void)user_src_addr;
     (void)user_addrlen;
 
-    if (fd < 0 || fd >= MAX_FILES) return -EBADF;
-    struct file *f = curproc->p_fd_table[fd];
-    if (!f || !f->f_vn) return -ENOTSOCK;
-    if (f->f_vn->ops == &netlink_socket_ops) return -EAGAIN;
-    if (f->f_vn->ops != &unix_socket_ops) return -ENOTSOCK;
+    struct file *f = fdget(fd);
+    if (!f) return -EBADF;
+    if (!f->f_vn) { fdput(f); return -ENOTSOCK; }
+    if (f->f_vn->ops == &netlink_socket_ops) { fdput(f); return -EAGAIN; }
+    if (f->f_vn->ops != &unix_socket_ops) { fdput(f); return -ENOTSOCK; }
 
-    if (len == 0) return 0;
+    if (len == 0) { fdput(f); return 0; }
 
     bool nonblock = (f->f_flags & O_NONBLOCK) || (flags & MSG_DONTWAIT);
 
@@ -908,6 +924,7 @@ int64_t sys_recvfrom(int fd, void *user_buf, size_t len, int flags, void *user_s
         if (ret < 0) {
             if (ret != -EAGAIN) {
             }
+            fdput(f);
             return total_read > 0 ? (int64_t)total_read : ret;
         }
         if (ret == 0) {
@@ -915,6 +932,7 @@ int64_t sys_recvfrom(int fd, void *user_buf, size_t len, int flags, void *user_s
         }
 
         if (copy_to_user((char *)user_buf + total_read, chunk, ret) < 0) {
+            fdput(f);
             return total_read > 0 ? (int64_t)total_read : -EFAULT;
         }
         total_read += ret;
@@ -923,6 +941,7 @@ int64_t sys_recvfrom(int fd, void *user_buf, size_t len, int flags, void *user_s
         }
     }
 
+    fdput(f);
     return (int64_t)total_read;
 }
 
@@ -1002,19 +1021,25 @@ int64_t sys_socketpair(int domain, int type, int protocol, int *user_sv) {
         file_close(f2);
         return fd1;
     }
+    file_close(f1);
 
     int fd2 = proc_alloc_fd(curproc, f2);
     if (fd2 < 0) {
+        spin_lock(&curproc->p_lock);
         curproc->p_fd_table[fd1] = NULL;
+        spin_unlock(&curproc->p_lock);
         file_close(f1);
         file_close(f2);
         return fd2;
     }
+    file_close(f2);
 
     int k_fds[2] = { fd1, fd2 };
     if (copy_to_user(user_sv, k_fds, sizeof(int) * 2) < 0) {
+        spin_lock(&curproc->p_lock);
         curproc->p_fd_table[fd1] = NULL;
         curproc->p_fd_table[fd2] = NULL;
+        spin_unlock(&curproc->p_lock);
         file_close(f1);
         file_close(f2);
         return -EFAULT;
@@ -1027,7 +1052,7 @@ int64_t sys_accept4(int fd, void *user_addr, uint32_t *user_addrlen, int flags) 
     int64_t ret = sys_accept(fd, user_addr, user_addrlen);
     if (ret >= 0) {
         int new_fd = (int)ret;
-        struct file *f = curproc->p_fd_table[new_fd];
+        struct file *f = fdget(new_fd);
         if (f) {
             if (flags & 0x800) { // SOCK_NONBLOCK / O_NONBLOCK
                 f->f_flags |= O_NONBLOCK;
@@ -1035,6 +1060,7 @@ int64_t sys_accept4(int fd, void *user_addr, uint32_t *user_addrlen, int flags) 
             if (flags & 0x80000) { // SOCK_CLOEXEC / O_CLOEXEC
                 f->f_flags |= 0x80000;
             }
+            fdput(f);
         }
     }
     return ret;

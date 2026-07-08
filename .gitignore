@@ -6,6 +6,7 @@
 .antigravitycli
 /apps/doom
 .vscode
+.cache
 
 *.o
 *.so

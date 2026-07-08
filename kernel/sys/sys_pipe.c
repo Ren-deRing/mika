@@ -217,19 +217,25 @@ int64_t sys_pipe2(int *user_pipefd, int flags) {
         file_close(wf);
         return r_fd;
     }
+    file_close(rf);
 
     int w_fd = proc_alloc_fd(curproc, wf);
     if (w_fd < 0) {
+        spin_lock(&curproc->p_lock);
         curproc->p_fd_table[r_fd] = NULL;
+        spin_unlock(&curproc->p_lock);
         file_close(rf);
         file_close(wf);
         return w_fd;
     }
+    file_close(wf);
 
     int k_fds[2] = { r_fd, w_fd };
     if (copy_to_user(user_pipefd, k_fds, sizeof(int) * 2) < 0) {
+        spin_lock(&curproc->p_lock);
         curproc->p_fd_table[r_fd] = NULL;
         curproc->p_fd_table[w_fd] = NULL;
+        spin_unlock(&curproc->p_lock);
         file_close(rf);
         file_close(wf);
         return -EFAULT;

@@ -1,0 +1,22 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "lsp": {
+    "clangd": {
+      "command": [
+        "clangd",
+        "--background-index",
+        "--clang-tidy",
+        "--completion-style=detailed",
+        "--query-driver=/usr/bin/clang,clang*",
+        "--header-insertion=never"
+      ],
+      "fileExtensions": {
+        ".c": "c",
+        ".h": "c",
+        ".s": "asm",
+        ".S": "asm",
+        ".asm": "asm"
+      }
+    }
+  }
+}

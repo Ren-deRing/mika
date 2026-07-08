@@ -49,6 +49,15 @@
 ### Current Bug: fflush #GP (stdout corruption)
 A deterministic user-space #GP occurs at `fflush+0xc` (musl libc) after enough `printf`/`fflush` calls. The `stdout` pointer (`.data.rel.ro`) gets overwritten with `0xf7f6f5f4f3f2f1f0` (sequential bytes f0-f7). Corruption is cumulative, user-space only (confirmed by kernel watch at every syscall entry). When protecting stdout's page with `mprotect(..., PROT_READ)`, the crash changes location but remains #GP — suggesting the corruption mechanism is more complex than a direct write to stdout's page.
 
+### spin_lock_irqsave on p_lock causes #GP in vmm_destroy_map
+`cli`/`popfq` (`arch_irq_save`/`arch_irq_restore`)가 KVM guest에서 page table page를 손상시킴.
+- 증상: `proc_alloc_fd`에 `spin_lock_irqsave` 사용 시 ~80% #GP at `vmm_destroy_map+0x128` (mov (%r12,%r9,8),%r10 — non-canonical page table pointer)
+- 영향 범위: `p_lock` 접근에서 `spin_lock_irqsave`를 `spin_lock`으로 사용. 타이머 핸들러는 `spin_trylock` 사용.
+- 남은 `spin_lock_irqsave` 사용처 (sys_close, fork, exec, fdget, page fault handler): crash 관찰 안 됨
+  - 추정: crash는 호출 빈도에 의존적 (proc_alloc_fd가 가장 많이 호출됨)
+- `spin_lock`은 UP에서 충분히 안전 (타이머가 `spin_trylock`만 사용 + no SMP contention)
+- 원인 미상
+
 ### Duplicated FAIL macro
 `user/init/init.c:43-44`: `FAIL` is defined twice identically.
 
@@ -97,12 +106,6 @@ Overall goal: adopt Linux-like fdget/fdput, atomic_inc_not_zero, and sleepable r
 - `include/kernel/lock_types.h` + `lock.h` + `kernel/misc/lock.c`: sleepable `rw_semaphore_t` (mutex-style wait queue, reader/writer count)
 - `include/kernel/fs/file.h`: declare `fdget(int fd)` / `fdput(struct file *f)` (defined in `vfs.c:710-722` but no header decl)
 
-### Step 0: Infrastructure
-
-- `include/kernel/atomic.h` (new): `atomic_inc_not_zero(uint32_t *ptr)` — CAS-based, returns 1 if value was >0 and was incremented
-- `include/kernel/lock_types.h` + `lock.h` + `kernel/misc/lock.c`: sleepable `rw_semaphore_t` (mutex-style wait queue, reader/writer count)
-- `include/kernel/fs/file.h`: declare `fdget(int fd)` / `fdput(struct file *f)` (defined in `vfs.c:710-722` but no header decl)
-
 ### Step 0b: Syscall file reorganization ✅ (build + boot verified)
 
 **목표**: `kernel/sys/`의 거대한 파일들을 단일 책임 파일로 분할.
@@ -119,73 +122,42 @@ Overall goal: adopt Linux-like fdget/fdput, atomic_inc_not_zero, and sleepable r
 | `sys_drm.c` (606) | real code 유지 (EINVAL stubs는 실제 ioctl 구현이어서 유지) |
 | `sys_mem.c` (778) | **→ `sys_mmap.c`** (rename) |
 
-### Phase 1.5: MI/MD Separation
+### Phase 1.5: MI/MD Separation ✅ (build + boot verified)
 
 **목표**: MI/MD 경계를 명확히 하고, inline asm과 `p2v`/`v2p`를 MI 코드에서 제거하여 멀티아치 기반 마련.
 
-**분석 결과 3대 문제**:
-1. **MI 코드 9개 파일에 `p2v()`/`v2p()` 직행** — `elf.c`, `exec.c`, `kmem.c`, `vma.c`, `syscall.c`, `sys_mmap.c` 등이 x86 HHDM에 강결합
-2. **MI 디렉토리 inline asm** — `xsave`/`fxsave` (`sys_proc.c`), `rdtsc`/`mfence` (`sys_futex.c`, `sys_time.c`), `cli;hlt` (`kasan.c`)
-3. **`mmu.h`가 x86 PTE 비트/KERNEL_BASE를 그대로 노출** — 아키텍처 추상화 부재
-
-#### Step A: Arch abstraction layer (headers + hooks)
-- **`include/kernel/mmu_types.h`** (new): 아키텍처 중립 MMU 타입 정의 (`pgprot_t`, `vm_flags_t`, `KERNEL_BASE` → `ARCH_KERNEL_BASE`)
-- **`include/kernel/mmu.h`** 정리: x86 PTE 비트(`X86_PTE_*`) 노출 제거, `MMU_FLAGS_*`를 `pgprot_t` 기반 추상화로 변경
-- **새 arch hook 선언** (`include/kernel/cpu.h` 또는 `arch_types.h`):
-  - `arch_fpu_save(void *buf)` / `arch_fpu_restore(void *buf)` — FPU context
-  - `arch_get_random_seed(void)` — RNG seed source
-  - `arch_panic_halt(void)` — panic 시 halt
-  - `arch_get_user_addr_limit(void)` — canonical user split
-- **`phys_to_virt()`/`virt_to_phys()`** — `p2v`/`v2p`를 대체할 arch 매크로 (기존 이름 유지 + alias)
-
-#### Step B: Strip inline asm from MI code
-- **`sys_proc.c`** (향후 `sys_fork.c` 등): `xsaveq`/`fxsave` → `arch_fpu_save()` / `arch_fpu_restore()`
-- **`sys_time.c`**: `rdtsc` → `arch_get_random_seed()`; `mfence` → `__sync_synchronize()` (compiler-generic)
-- **`sys_futex.c`**: `rdtsc` → `arch_get_ticks()` (arch hook for timeout)
-- **`kasan.c`**: `cli; hlt` → `arch_panic_halt()` & `arch_irq_disable()`
-- **`syscall.c`**: `USER_ADDR_LIMIT` → `arch_get_user_addr_limit()`
-- **`sys_time.c`**: `sys_arch_prctl` → `#ifdef __x86_64__`로 조건부 컴파일 (MD syscall)
-
-#### Step C: p2v/v2p → phys_to_virt/virt_to_phys
-- **전역 rename**: `p2v()` → `phys_to_virt()`, `v2p()` → `virt_to_phys()` (매크로 alias 유지, 1-1 rename)
-- **`elf.c`**: `p2v()`로 물리 메모리에 직접 접근하는 패턴 → `vm_read()`/`vm_write()` MI wrapper로 추상화 (page_table_t 기반 메모리 읽기)
-- **`kmem.c`**: slab allocator `p2v()` → `page_to_virt(struct page*)` MI 함수
-- **`vma.c`**: file-backed fault `p2v()` → generic `vm_fault_resolve()` wrapper
-- **`syscall.c`**: `copy_to_user`/`copy_from_user` 내부 `p2v()` → `phys_to_virt()`
-
-#### Step D: Directory structure cleanup
+**완료 항목**:
+- `include/kernel/mmu_types.h` (new): `pgprot_t`, `phys_addr_t`, `vm_flags_t`, `ARCH_KERNEL_BASE`
+- `include/kernel/mmu.h`: `phys_to_virt()`/`virt_to_phys()` 추가, p2v/v2p를 alias로 유지, `KERNEL_BASE` → `ARCH_KERNEL_BASE`
+- `include/kernel/cpu.h`: `arch_fpu_save/restore`, `arch_get_random_seed`, `arch_panic_halt`, `arch_get_user_addr_limit`, `arch_get_ticks` 선언
+- `kernel/arch/x86_64/cpu.c`: 위 arch hooks 구현 (xsaveq/fxsave, rdtsc, cli;hlt 등)
+- MI 코드 inline asm 제거: `sys_proc.c` (xsaveq/fxsave → arch_fpu_save), `sys_time.c` (rdtsc → arch_get_random_seed, mfence → __sync_synchronize, sys_arch_prctl → `#ifdef __x86_64__`), `kasan.c` (cli;hlt → arch_panic_halt), `syscall.c` (USER_ADDR_LIMIT → arch_get_user_addr_limit())
+- 전역 rename: `p2v(` → `phys_to_virt(`, `v2p(` → `virt_to_phys(` (MI + MD 모든 .c 파일)
+- 디렉토리 정리: `kernel/mm/` (kmem/vma/kasan), `kernel/lib/` (lock/kprintf/clock)
 ```
 kernel/
-  mm/                           # MI memory management (new)
-    kmem.c                      # (from kernel/misc/)
-    vma.c                       # (from kernel/misc/)
-    kasan.c                     # (from kernel/misc/)
-    page.c                      # (NEW: physical page allocator, extracted from mmu.c pmm_*)
-  lib/                          # MI library (new)
-    lock.c                      # (from kernel/misc/)
-    kprintf.c                   # (from kernel/misc/)
-    clock.c                     # (from kernel/time/)
-  proc/                         # MI process (keep, but clean deps)
+  mm/                           # MI memory management
+    kmem.c, vma.c, kasan.c
+  lib/                          # MI library
+    lock.c, kprintf.c, clock.c
+  proc/                         # MI process
     elf.c, exec.c, proc.c, sched.c, signal.c
-  fs/                           # MI VFS (keep)
+  fs/                           # MI VFS
     vfs.c, vnode.c, file.c, ramfs.c, initrd.c
-  sys/                          # MI syscalls (keep, Step 0b에서 정리 완료)
-  arch/x86_64/                  # MD (keep as single arch dir)
+  sys/                          # MI syscalls (Step 0b 정리 완료)
+  arch/x86_64/                  # MD
+  misc/                         # remaining misc (kstack.c)
 ```
 
-**실행 순서**: A → B → C 순차적 (D는 A+C 후 마지막에 실행). 각 Step마다 `make -j4` + `timeout 10 make run` 검증.
-
-**Total files changed**: ~25 files across kernel/ (headers, sys/, misc/, proc/, arch/x86_64/)
-
-### Step 1: Phase 1 — fdget/fdput 전면 도입 (~30 sites)
-- **`proc_alloc_fd`**: `file_ref(f)` 추가 → fd leak 근본 원인 해결 (지금은 저장만 하고 refcnt 안 올림)
+### Step 1: Phase 1 — fdget/fdput 전면 도입 (~30 sites) ✅ (build + boot + 10/10 run verified)
+- **`proc_alloc_fd`**: `file_ref(f)` 추가 → fd leak 근본 원인 해결
 - **`sys_pipe2`** / **`sys_socketpair`** rollback `p_fd_table[...]=NULL`: `p_lock` 안에서 수행
 - All unlocked `p_fd_table[fd]` reads → `fdget(fd)` / `fdput(f)` pattern
   - `sys_file.c`: read/write/fstat/flock/ioctl/fcntl
   - `sys_mem.c`: mmap fb0 check
   - `sys_fd.c`: signalfd/timerfd_settime/timerfd_gettime
   - `sys_epoll.c`: check_fd_readiness/epoll_ctl/epoll_wait
-  - `sys_socket.c`: setsockopt/listen/accept/connect/sendto/recvfrom/fallocate/sock_read(239)/poll_check_fd
+  - `sys_socket.c`: setsockopt/listen/accept/connect/sendto/recvfrom/poll_check_fd
   - `initrd.c`: unlocked read
 
 ### Step 2: Phase 1b — Error rollback + ELF permission + socket cleanup fix

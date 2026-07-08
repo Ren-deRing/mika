@@ -370,6 +370,7 @@ int vfs_open(const char *path, int flags, mode_t mode, int *fd_out) {
 
     int fd = proc_alloc_fd(p, f);
     if (fd < 0) { file_close(f); return fd; }
+    file_close(f);
 
     *fd_out = fd;
     return 0;

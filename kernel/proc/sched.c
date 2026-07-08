@@ -5,6 +5,7 @@
 #include <kernel/init.h>
 #include <kernel/intc.h>
 #include <kernel/kmem.h>
+#include <kernel/softirq.h>
 #include <boot/bootinfo.h>
 #include <string.h>
 #include <kernel/printf.h>
@@ -385,6 +386,11 @@ void thread_signal_wakeup(struct thread *t) {
     arch_irq_restore(flags);
 }
 
+static void sched_tick_softirq(struct trapframe *regs) {
+    (void)regs;
+    sched_tick();
+}
+
 void scheduler_init(void) {
     for (int i = 0; i < MAX_CPUS; i++) {
         spin_lock_init(&cpu_mlfqs[i].lock);
@@ -398,6 +404,8 @@ void scheduler_init(void) {
     spin_lock_init(&sleep_queue.lock);
 
     arch_irq_save();
+
+    open_softirq(TIMER_SOFTIRQ, sched_tick_softirq);
 
     arch_sched_init();
 
