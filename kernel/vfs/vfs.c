@@ -16,6 +16,7 @@
 #include <kernel/printf.h>
 #include <kernel/proc.h>
 #include <kernel/cpu.h>
+#include <kernel/atomic.h>
 
 #include <uapi/fcntl.h>
 #include <uapi/errno.h>
@@ -711,10 +712,11 @@ int vfs_rename(const char *oldpath, const char *newpath) {
 struct file *fdget(int fd) {
     if (fd < 0 || fd >= MAX_FILES) return NULL;
     struct proc *p = curproc;
-    uint64_t flags = spin_lock_irqsave(&p->p_lock);
-    struct file *f = p->p_fd_table[fd];
-    if (f) __atomic_fetch_add(&f->f_refcnt, 1, __ATOMIC_SEQ_CST);
-    spin_unlock_irqrestore(&p->p_lock, flags);
+    rcu_read_lock();
+    struct file *f = __atomic_load_n(&p->p_fd_table[fd], __ATOMIC_ACQUIRE);
+    if (f && !atomic_inc_not_zero(&f->f_refcnt))
+        f = NULL;
+    rcu_read_unlock();
     return f;
 }
 

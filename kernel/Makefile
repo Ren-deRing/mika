@@ -24,6 +24,7 @@ NO_KASAN_PATHS := \
     lib/lock.c \
     misc/kstack.c \
     misc/softirq.c \
+    misc/rcu.c \
     arch/x86_64/mmu.c \
     arch/x86_64/idt.c \
     arch/x86_64/gdt.c \

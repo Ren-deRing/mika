@@ -2,6 +2,7 @@
 
 #include <kernel/lock_types.h>
 #include <kernel/fs/vnode.h>
+#include <kernel/rcu.h>
 #include <uapi/types.h>
 
 struct file {
@@ -10,6 +11,7 @@ struct file {
     off_t         f_pos;      /* 현재 위치 - f_lock */
     uint32_t      f_refcnt;   /* atomic */
     spinlock_t    f_lock;
+    struct rcu_head f_rcu;    /* deferred free */
 };
 
 struct file *file_alloc(void);

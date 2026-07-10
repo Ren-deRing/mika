@@ -128,11 +128,17 @@ int64_t sys_clone(uint64_t flags, void *child_stack, void *ptid, void *ctid, uin
         }
         spin_unlock_irqrestore(&parent_p->p_lock, lock_flags);
 
-        child_p->p_vm_map = mmu_clone_map(parent_p->p_vm_map);
-        if (!child_p->p_vm_map) {
-            goto err_proc;
+        {
+            page_table_t *new_map = mmu_clone_map(parent_p->p_vm_map);
+            if (!new_map) {
+                mmu_destroy_map(child_p->p_vm_map);
+                child_p->p_vm_map = NULL;
+                goto err_proc;
+            }
+            mmu_destroy_map(child_p->p_vm_map);
+            child_p->p_vm_map = new_map;
         }
-        if (child_p->p_vm_map) {
+        {
             page_t* pg = phys_to_page(virt_to_phys(child_p->p_vm_map));
             if (pg) {
                 pg->pg_proc = child_p;
@@ -265,18 +271,24 @@ int64_t sys_fork(void) {
         }
         spin_unlock_irqrestore(&parent_p->p_lock, lock_flags);
 
-        child_p->p_vm_map = mmu_clone_map(parent_p->p_vm_map);
-        if (!child_p->p_vm_map) {
-            goto err_proc;
+        {
+            page_table_t *new_map = mmu_clone_map(parent_p->p_vm_map);
+            if (!new_map) {
+                mmu_destroy_map(child_p->p_vm_map);
+                child_p->p_vm_map = NULL;
+                goto err_proc;
+            }
+            mmu_destroy_map(child_p->p_vm_map);
+            child_p->p_vm_map = new_map;
         }
-        if (child_p->p_vm_map) {
-        page_t* pg = phys_to_page(virt_to_phys(child_p->p_vm_map));
-        if (pg) {
-            pg->pg_proc = child_p;
+        {
+            page_t* pg = phys_to_page(virt_to_phys(child_p->p_vm_map));
+            if (pg) {
+                pg->pg_proc = child_p;
+            }
         }
-    }
 
-    // VMA 트리 Clone
+        // VMA 트리 Clone
     uint64_t vma_lock_flags = spin_lock_irqsave(&parent_p->p_vma_lock);
     struct vm_area *vma;
     vma_for_each(vma, &parent_p->p_vma_list) {
@@ -574,22 +586,21 @@ int64_t sys_wait4(pid_t pid, int *user_wstatus, int options, void *user_rusage) 
 
         if (found_child) {
             pid_t child_pid = found_child->p_pid;
-            int exit_status = found_child->p_exit_status;
-
-            if (user_wstatus != NULL) {
-                if (!is_user_address_range(user_wstatus, sizeof(int))) {
-                    spin_unlock_irqrestore(&parent->p_lock, lock_flags);
-                    return -EFAULT;
-                }
-                int wstatus_val = (exit_status & 0xff) << 8;
-                if (copy_to_user(user_wstatus, &wstatus_val, sizeof(int)) < 0) {
-                    spin_unlock_irqrestore(&parent->p_lock, lock_flags);
-                    return -EFAULT;
-                }
-            }
+            int wstatus_val = (found_child->p_exit_status & 0xff) << 8;
 
             list_del(&found_child->p_child_link);
             spin_unlock_irqrestore(&parent->p_lock, lock_flags);
+
+            if (user_wstatus != NULL) {
+                if (!is_user_address_range(user_wstatus, sizeof(int))) {
+                    proc_put(found_child);
+                    return -EFAULT;
+                }
+                if (copy_to_user(user_wstatus, &wstatus_val, sizeof(int)) < 0) {
+                    proc_put(found_child);
+                    return -EFAULT;
+                }
+            }
 
             proc_put(found_child);
 

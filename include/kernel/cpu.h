@@ -44,6 +44,9 @@ struct cpu {
 
     uint64_t softirq_pending;
     bool     in_softirq;
+
+    int      rcu_nesting;
+    int      rcu_qs_pending;
 };
 
 #if defined(__x86_64__)

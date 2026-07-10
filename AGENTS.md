@@ -1,4 +1,4 @@
-# Doppio OS
+# Doppio OS (SMP-ready)
 
 ## Communication
 - Respond in Korean.
@@ -48,15 +48,6 @@
 
 ### Current Bug: fflush #GP (stdout corruption)
 A deterministic user-space #GP occurs at `fflush+0xc` (musl libc) after enough `printf`/`fflush` calls. The `stdout` pointer (`.data.rel.ro`) gets overwritten with `0xf7f6f5f4f3f2f1f0` (sequential bytes f0-f7). Corruption is cumulative, user-space only (confirmed by kernel watch at every syscall entry). When protecting stdout's page with `mprotect(..., PROT_READ)`, the crash changes location but remains #GP — suggesting the corruption mechanism is more complex than a direct write to stdout's page.
-
-### spin_lock_irqsave on p_lock causes #GP in vmm_destroy_map
-`cli`/`popfq` (`arch_irq_save`/`arch_irq_restore`)가 KVM guest에서 page table page를 손상시킴.
-- 증상: `proc_alloc_fd`에 `spin_lock_irqsave` 사용 시 ~80% #GP at `vmm_destroy_map+0x128` (mov (%r12,%r9,8),%r10 — non-canonical page table pointer)
-- 영향 범위: `p_lock` 접근에서 `spin_lock_irqsave`를 `spin_lock`으로 사용. 타이머 핸들러는 `spin_trylock` 사용.
-- 남은 `spin_lock_irqsave` 사용처 (sys_close, fork, exec, fdget, page fault handler): crash 관찰 안 됨
-  - 추정: crash는 호출 빈도에 의존적 (proc_alloc_fd가 가장 많이 호출됨)
-- `spin_lock`은 UP에서 충분히 안전 (타이머가 `spin_trylock`만 사용 + no SMP contention)
-- 원인 미상
 
 ### Duplicated FAIL macro
 `user/init/init.c:43-44`: `FAIL` is defined twice identically.

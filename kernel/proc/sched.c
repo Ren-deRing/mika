@@ -6,6 +6,7 @@
 #include <kernel/intc.h>
 #include <kernel/kmem.h>
 #include <kernel/softirq.h>
+#include <kernel/rcu.h>
 #include <boot/bootinfo.h>
 #include <string.h>
 #include <kernel/printf.h>
@@ -225,6 +226,8 @@ void mi_switch(void) {
 
     curcpu->prev_thread = prev;
 
+    rcu_report_qs();
+
     arch_context_switch(prev, next);
 
     thread_post_switch_hook();
@@ -406,6 +409,7 @@ void scheduler_init(void) {
     arch_irq_save();
 
     open_softirq(TIMER_SOFTIRQ, sched_tick_softirq);
+    open_softirq(RCU_SOFTIRQ, rcu_softirq_handler);
 
     arch_sched_init();
 

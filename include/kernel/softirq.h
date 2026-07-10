@@ -3,6 +3,7 @@
 #include <kernel/cpu.h>
 
 #define TIMER_SOFTIRQ 0
+#define RCU_SOFTIRQ   1
 #define NR_SOFTIRQS   8
 
 typedef void (*softirq_action_t)(struct trapframe *regs);

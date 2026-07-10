@@ -1,7 +1,13 @@
 #include <kernel/fs/file.h>
 #include <kernel/lock.h>
+#include <kernel/rcu.h>
 #include <kernel/kmem.h>
 #include <string.h>
+
+static void file_free_rcu(void *arg) {
+    struct file *f = (struct file *)arg;
+    kfree(f);
+}
 
 struct file *file_alloc(void) {
     struct file *f = kmalloc(sizeof(struct file));
@@ -25,9 +31,11 @@ void file_close(struct file *f) {
 
     if (__atomic_fetch_sub(&f->f_refcnt, 1, __ATOMIC_SEQ_CST) == 1) {
         if (f->f_vn) {
-            vput(f->f_vn);
+            struct vnode *vn = f->f_vn;
+            f->f_vn = NULL;
+            vput(vn);
         }
-        kfree(f);
+        call_rcu(&f->f_rcu, file_free_rcu, f);
     }
 }
 

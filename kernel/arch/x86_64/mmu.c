@@ -504,6 +504,13 @@ void vmm_init(void) {
     register_handler(14, handle_page_fault, NULL);
 }
 
+static inline bool vmm_pt_is_empty(page_table_t *pt) {
+    for (int i = 0; i < 512; i++)
+        if (pt->entries[i] & X86_PTE_PRESENT)
+            return false;
+    return true;
+}
+
 void vmm_unmap(page_table_t* pml4, uint64_t virt) {
     uint64_t idxs[4] = { GET_PML4_IDX(virt), GET_PDPT_IDX(virt), GET_PD_IDX(virt), GET_PT_IDX(virt) };
     pt_entry_t* entries[4];
@@ -524,13 +531,21 @@ void vmm_unmap(page_table_t* pml4, uint64_t virt) {
         page_t* page = phys_to_page(phys);
         if (page) {
             if (page->ref_count > 0) page->ref_count--;
-            if (page->ref_count == 0) {
+            if (page->ref_count == 0)
                 page_free(page, 9);
-            }
         }
 
         *entries[2] = 0;
         invlpg(virt);
+
+        if (vmm_pt_is_empty(tables[2])) {
+            page_free(phys_to_page(virt_to_phys(tables[2])), 0);
+            *entries[1] = 0;
+            if (vmm_pt_is_empty(tables[1])) {
+                page_free(phys_to_page(virt_to_phys(tables[1])), 0);
+                *entries[0] = 0;
+            }
+        }
         return;
     }
 
@@ -542,13 +557,25 @@ void vmm_unmap(page_table_t* pml4, uint64_t virt) {
     page_t* page = phys_to_page(phys);
     if (page) {
         if (page->ref_count > 0) page->ref_count--;
-        if (page->ref_count == 0) {
+        if (page->ref_count == 0)
             page_free(page, 0);
-        }
     }
 
     *entries[3] = 0;
     invlpg(virt);
+
+    if (vmm_pt_is_empty(tables[3])) {
+        page_free(phys_to_page(virt_to_phys(tables[3])), 0);
+        *entries[2] = 0;
+        if (vmm_pt_is_empty(tables[2])) {
+            page_free(phys_to_page(virt_to_phys(tables[2])), 0);
+            *entries[1] = 0;
+            if (vmm_pt_is_empty(tables[1])) {
+                page_free(phys_to_page(virt_to_phys(tables[1])), 0);
+                *entries[0] = 0;
+            }
+        }
+    }
 }
 
 page_table_t* vmm_get_current_pml4(void) {
