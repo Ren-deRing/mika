@@ -9,6 +9,7 @@
 #include <kernel/lock.h>
 #include <kernel/fs/vfs.h>
 #include <kernel/fs/vnode.h>
+#include <kernel/wait.h>
 #include <uapi/fcntl.h>
 #include <uapi/sys/stat.h>
 #include <string.h>
@@ -16,12 +17,14 @@
 #define PIPE_BUF_SIZE 4096
 
 struct pipe_buffer {
-    char       buf[PIPE_BUF_SIZE];
-    size_t     head;
-    size_t     tail;
-    size_t     size;
-    spinlock_t lock;
-    int        refcnt;
+    char            buf[PIPE_BUF_SIZE];
+    size_t          head;
+    size_t          tail;
+    size_t          size;
+    spinlock_t      lock;
+    int             refcnt;
+    wait_queue_head_t rwaitq; /* reader waiters */
+    wait_queue_head_t wwaitq; /* writer waiters */
 };
 
 static ssize_t pipe_read(struct vnode *vp, void *buf, size_t n, off_t off) {
@@ -33,14 +36,19 @@ static ssize_t pipe_read(struct vnode *vp, void *buf, size_t n, off_t off) {
 
     while (bytes_read < n) {
         spin_lock(&pb->lock);
-        if (pb->size == 0) {
-            if (pb->refcnt < 2) {
-                spin_unlock(&pb->lock);
-                break;
-            }
+
+        while (pb->size == 0 && pb->refcnt >= 2) {
+            curthread->t_state = THREAD_WAITING;
+            add_wait_queue(&pb->wwaitq, curthread);
             spin_unlock(&pb->lock);
             thread_yield();
-            continue;
+            spin_lock(&pb->lock);
+        }
+        remove_wait_queue(&pb->wwaitq, curthread);
+
+        if (pb->size == 0) {
+            spin_unlock(&pb->lock);
+            break;
         }
 
         size_t to_read = n - bytes_read;
@@ -65,6 +73,7 @@ static ssize_t pipe_read(struct vnode *vp, void *buf, size_t n, off_t off) {
         bytes_read += batch;
 
         spin_unlock(&pb->lock);
+        wake_up(&pb->rwaitq);
     }
 
     return (ssize_t)bytes_read;
@@ -79,19 +88,23 @@ static ssize_t pipe_write(struct vnode *vp, const void *buf, size_t n, off_t off
 
     while (bytes_written < n) {
         spin_lock(&pb->lock);
+
+        while (pb->refcnt >= 2 && PIPE_BUF_SIZE - pb->size == 0) {
+            curthread->t_state = THREAD_WAITING;
+            add_wait_queue(&pb->rwaitq, curthread);
+            spin_unlock(&pb->lock);
+            thread_yield();
+            spin_lock(&pb->lock);
+        }
+        remove_wait_queue(&pb->rwaitq, curthread);
+
         if (pb->refcnt < 2) {
             spin_unlock(&pb->lock);
             return bytes_written > 0 ? (ssize_t)bytes_written : -EPIPE;
         }
 
-        size_t free_space = PIPE_BUF_SIZE - pb->size;
-        if (free_space == 0) {
-            spin_unlock(&pb->lock);
-            thread_yield();
-            continue;
-        }
-
         size_t to_write = n - bytes_written;
+        size_t free_space = PIPE_BUF_SIZE - pb->size;
         if (to_write > free_space) to_write = free_space;
 
         char kbuf[256];
@@ -113,6 +126,7 @@ static ssize_t pipe_write(struct vnode *vp, const void *buf, size_t n, off_t off
         bytes_written += batch;
 
         spin_unlock(&pb->lock);
+        wake_up(&pb->wwaitq);
     }
 
     return (ssize_t)bytes_written;
@@ -123,11 +137,14 @@ static int pipe_inactive(struct vnode *vp) {
     if (pb) {
         spin_lock(&pb->lock);
         pb->refcnt--;
-        if (pb->refcnt == 0) {
-            spin_unlock(&pb->lock);
+        int last = (pb->refcnt == 0);
+        spin_unlock(&pb->lock);
+
+        wake_up_all(&pb->rwaitq);
+        wake_up_all(&pb->wwaitq);
+
+        if (last) {
             kfree(pb);
-        } else {
-            spin_unlock(&pb->lock);
         }
     }
     vp->data = NULL;
@@ -165,6 +182,8 @@ int64_t sys_pipe2(int *user_pipefd, int flags) {
     if (!pb) return -ENOMEM;
     memset(pb, 0, sizeof(struct pipe_buffer));
     spin_lock_init(&pb->lock);
+    init_waitqueue_head(&pb->rwaitq);
+    init_waitqueue_head(&pb->wwaitq);
     pb->refcnt = 2;
 
     struct vnode *r_vn = vnode_alloc(S_IFIFO, &pipe_ops);
