@@ -209,6 +209,7 @@ page_t* pmm_alloc_pages(uint8_t order) {
 
     page->is_free = false;
     page->order = order;
+    page->ref_count = 0;
     
     return page;
 }

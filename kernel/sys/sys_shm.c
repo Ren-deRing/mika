@@ -110,6 +110,7 @@ int64_t sys_shmget(key_t key, size_t size, int shmflg) {
             spin_unlock_irqrestore(&shm_lock, flags);
             return -ENOMEM;
         }
+        pg->ref_count = 1;
         seg->pages[p] = pg;
         uintptr_t paddr = page_to_phys(pg);
         memset(phys_to_virt(paddr), 0, PAGE_SIZE);
