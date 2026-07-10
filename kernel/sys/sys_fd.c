@@ -22,27 +22,29 @@ static ssize_t eventfd_read(struct vnode *vp, void *buf, size_t count, off_t off
     if (!eb) return -EINVAL;
     if (count < sizeof(uint64_t)) return -EINVAL;
 
-    uint64_t value = 0;
-    while (1) {
-        spin_lock(&eb->lock);
-        if (eb->counter > 0) {
-            if (eb->flags & 1) { // EFD_SEMAPHORE
-                value = 1;
-                eb->counter--;
-            } else {
-                value = eb->counter;
-                eb->counter = 0;
-            }
-            spin_unlock(&eb->lock);
-            break;
-        }
-
-        spin_unlock(&eb->lock);
+    spin_lock(&eb->lock);
+    while (eb->counter == 0) {
         if (eb->flags & 00004000) { // EFD_NONBLOCK
+            spin_unlock(&eb->lock);
             return -EAGAIN;
         }
+        curthread->t_state = THREAD_WAITING;
+        add_wait_queue(&eb->waitq, curthread);
+        spin_unlock(&eb->lock);
         thread_yield();
+        spin_lock(&eb->lock);
     }
+    remove_wait_queue(&eb->waitq, curthread);
+
+    uint64_t value;
+    if (eb->flags & 1) { // EFD_SEMAPHORE
+        value = 1;
+        eb->counter--;
+    } else {
+        value = eb->counter;
+        eb->counter = 0;
+    }
+    spin_unlock(&eb->lock);
 
     if (copy_to_user(buf, &value, sizeof(uint64_t)) < 0) {
         return -EFAULT;
@@ -65,20 +67,24 @@ static ssize_t eventfd_write(struct vnode *vp, const void *buf, size_t count, of
         return -EINVAL;
     }
 
-    while (1) {
-        spin_lock(&eb->lock);
-        if (0xfffffffffffffffeULL - eb->counter >= value) {
-            eb->counter += value;
-            spin_unlock(&eb->lock);
-            break;
-        }
-        spin_unlock(&eb->lock);
+    spin_lock(&eb->lock);
+    while (0xfffffffffffffffeULL - eb->counter < value) {
         if (eb->flags & 00004000) { // EFD_NONBLOCK
+            spin_unlock(&eb->lock);
             return -EAGAIN;
         }
+        curthread->t_state = THREAD_WAITING;
+        add_wait_queue(&eb->waitq, curthread);
+        spin_unlock(&eb->lock);
         thread_yield();
+        spin_lock(&eb->lock);
     }
+    remove_wait_queue(&eb->waitq, curthread);
 
+    eb->counter += value;
+    spin_unlock(&eb->lock);
+
+    wake_up(&eb->waitq);
     return sizeof(uint64_t);
 }
 
@@ -87,12 +93,12 @@ static int eventfd_inactive(struct vnode *vp) {
     if (eb) {
         spin_lock(&eb->lock);
         eb->refcnt--;
-        if (eb->refcnt == 0) {
-            spin_unlock(&eb->lock);
+        int do_free = (eb->refcnt == 0);
+        if (do_free)
+            wake_up_all(&eb->waitq);
+        spin_unlock(&eb->lock);
+        if (do_free)
             kfree(eb);
-        } else {
-            spin_unlock(&eb->lock);
-        }
     }
     vp->data = NULL;
     return 0;
@@ -124,6 +130,7 @@ int64_t sys_eventfd2(unsigned int initval, int flags) {
     eb->flags = flags;
     eb->refcnt = 1;
     spin_lock_init(&eb->lock);
+    init_waitqueue_head(&eb->waitq);
 
     struct vnode *vp = vnode_alloc(S_IFIFO, &eventfd_ops);
     if (!vp) {

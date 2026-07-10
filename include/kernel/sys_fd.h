@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 #include <kernel/lock.h>
+#include <kernel/wait.h>
 #include <uapi/types.h>
 
 struct eventfd_buffer {
@@ -9,6 +10,7 @@ struct eventfd_buffer {
     spinlock_t lock;
     int flags;
     int refcnt;
+    wait_queue_head_t waitq;
 };
 
 struct signalfd_buffer {

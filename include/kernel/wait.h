@@ -75,6 +75,11 @@ static inline void remove_wait_queue(wait_queue_head_t *wq, struct thread *t) {
 static inline void wake_up(wait_queue_head_t *wq) {
     spin_lock(&wq->lock);
     if (!list_empty(&wq->head)) {
+        struct list_node *head_next = wq->head.next;
+        if ((uintptr_t)head_next < 0x10) {
+            spin_unlock(&wq->lock);
+            return;
+        }
         struct thread *t = list_first_entry(&wq->head, struct thread, t_wait_node);
         list_del(&t->t_wait_node);
         list_init(&t->t_wait_node);
@@ -87,6 +92,11 @@ static inline void wake_up(wait_queue_head_t *wq) {
 static inline void wake_up_all(wait_queue_head_t *wq) {
     spin_lock(&wq->lock);
     while (!list_empty(&wq->head)) {
+        struct list_node *head_next = wq->head.next;
+        if ((uintptr_t)head_next < 0x10) {
+            spin_unlock(&wq->lock);
+            return;
+        }
         struct thread *t = list_first_entry(&wq->head, struct thread, t_wait_node);
         list_del(&t->t_wait_node);
         list_init(&t->t_wait_node);
