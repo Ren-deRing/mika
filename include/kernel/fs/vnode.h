@@ -4,6 +4,7 @@
 
 #include <kernel/list.h>
 #include <kernel/lock.h>
+#include <kernel/atomic.h>
 
 #define VNODE_HASH_SIZE 512
 
@@ -46,8 +47,9 @@ struct vnode {
     int  v_reclaimable;
 };
 
-static inline void vref(struct vnode *vn) {
-    if (vn) __atomic_fetch_add(&vn->ref_count, 1, __ATOMIC_SEQ_CST);
+static inline int vref(struct vnode *vn) {
+    if (!vn) return 0;
+    return atomic_inc_not_zero((uint32_t *)&vn->ref_count);
 }
 
 void vnode_init(void);

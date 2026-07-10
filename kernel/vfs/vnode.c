@@ -123,6 +123,7 @@ void vput(struct vnode *vn) {
     uint64_t flags = spin_lock_irqsave(&vnode_list_lock);
 
     if (__atomic_sub_fetch(&vn->ref_count, 1, __ATOMIC_SEQ_CST) == 0) {
+        vn->v_reclaimable = 1;
         if (vn->v_hash.next && vn->v_hash.next != &vn->v_hash) {
             list_del(&vn->v_hash);
             list_init(&vn->v_hash);
