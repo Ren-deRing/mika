@@ -150,6 +150,7 @@ static void sock_free(struct unix_socket *s) {
     
     if (s->peer) {
         spin_lock(&s->peer->lock);
+        s->peer->peer = NULL;
         s->peer->state = SS_DISCONNECTED;
         spin_unlock(&s->peer->lock);
     }
