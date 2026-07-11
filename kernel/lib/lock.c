@@ -11,10 +11,6 @@ void spin_lock_init(spinlock_t *lock) {
 }
 
 void spin_lock(spinlock_t *lock) {
-    if (lock->holder_cpu == curcpu->id && lock->now_serving != lock->next_ticket) {
-        dprintf("[Deadlock] Panic: CPU %d already holds this lock!\n", curcpu->id);
-    }
-
     uint32_t ticket = __sync_fetch_and_add(&lock->next_ticket, 1);
     
     while (lock->now_serving != ticket) {
@@ -131,15 +127,19 @@ void down_read(rw_semaphore_t *rwsem) {
 void up_read(rw_semaphore_t *rwsem) {
     uint64_t flags = spin_lock_irqsave(&rwsem->wait_lock);
     rwsem->count--;
-    if (rwsem->count == 0) {
-        struct thread *waiter;
-        while (!list_empty(&rwsem->wait_queue)) {
-            waiter = list_first_entry(&rwsem->wait_queue, struct thread, t_wait_node);
-            list_del(&waiter->t_wait_node);
-            waiter->t_state = THREAD_READY;
-            sched_enqueue(waiter);
-        }
+    if (rwsem->count == 0 && !list_empty(&rwsem->wait_queue)) {
+        struct thread *waiter = list_first_entry(&rwsem->wait_queue, struct thread, t_wait_node);
+        list_del(&waiter->t_wait_node);
+        waiter->t_state = THREAD_READY;
+        sched_enqueue(waiter);
     }
+    spin_unlock_irqrestore(&rwsem->wait_lock, flags);
+}
+
+void downgrade_write(rw_semaphore_t *rwsem) {
+    uint64_t flags = spin_lock_irqsave(&rwsem->wait_lock);
+    rwsem->count = 1;
+    rwsem->owner = NULL;
     spin_unlock_irqrestore(&rwsem->wait_lock, flags);
 }
 
@@ -147,16 +147,19 @@ void down_write(rw_semaphore_t *rwsem) {
     uint64_t flags;
     while (1) {
         flags = spin_lock_irqsave(&rwsem->wait_lock);
+        
         if (rwsem->count == 0) {
             rwsem->count = -1;
             rwsem->owner = curthread;
             spin_unlock_irqrestore(&rwsem->wait_lock, flags);
             break;
         }
+        
         struct thread *t = curthread;
         t->t_state = THREAD_WAITING;
         t->t_lock_to_release = &rwsem->wait_lock;
         list_add_tail(&t->t_wait_node, &rwsem->wait_queue);
+        
         thread_yield();
         arch_irq_restore(flags);
     }
@@ -166,9 +169,9 @@ void up_write(rw_semaphore_t *rwsem) {
     uint64_t flags = spin_lock_irqsave(&rwsem->wait_lock);
     rwsem->count = 0;
     rwsem->owner = NULL;
-    struct thread *waiter;
-    while (!list_empty(&rwsem->wait_queue)) {
-        waiter = list_first_entry(&rwsem->wait_queue, struct thread, t_wait_node);
+    
+    if (!list_empty(&rwsem->wait_queue)) {
+        struct thread *waiter = list_first_entry(&rwsem->wait_queue, struct thread, t_wait_node);
         list_del(&waiter->t_wait_node);
         waiter->t_state = THREAD_READY;
         sched_enqueue(waiter);

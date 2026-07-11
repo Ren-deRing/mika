@@ -462,25 +462,42 @@ void vma_remove_range(struct vm_area **root, struct list_node *head,
 }
 
 // Demand Fault 만능해결꾼 (PF Fault 핸들러에서 호출됨)
-uintptr_t vma_resolve_fault(struct proc *p, uintptr_t addr) {
+// __vma_resolve_fault: p_vma_lock 전제됨
+void __vma_resolve_fault(struct proc *p, uintptr_t addr,
+                          struct vnode **vn_out, int64_t *offset_out,
+                          uint32_t *flags_out)
+{
+    struct vm_area *vma = vma_find(p->p_vma_root, addr);
+    if (!vma) {
+        *vn_out = NULL;
+        *flags_out = 0;
+        return;
+    }
+    *flags_out = vma->flags;
+    if (vma->vn) {
+        *vn_out = vma->vn;
+        vref(vma->vn);
+        *offset_out = vma->file_offset + (int64_t)(addr - vma->start);
+    }
+}
+
+uintptr_t vma_resolve_fault(struct proc *p, uintptr_t addr, uint32_t *flags_out) {
     struct vnode *vn = NULL;
     int64_t file_offset = 0;
     uint32_t vma_flags = 0;
 
-    uint64_t lk = spin_lock_irqsave(&p->p_vma_lock);
-    struct vm_area *vma = vma_find(p->p_vma_root, addr);
-    if (vma) {
-        vma_flags = vma->flags;
-        if (vma->vn) {
-            vn = vma->vn;
-            vref(vn);
-            file_offset = vma->file_offset + (int64_t)(addr - vma->start);
-        }
-    }
-    spin_unlock_irqrestore(&p->p_vma_lock, lk);
+    down_read(&p->p_vma_lock);
+    __vma_resolve_fault(p, addr, &vn, &file_offset, &vma_flags);
+    up_read(&p->p_vma_lock);
 
-    // No VMA
-    if (!vma)
+    if (flags_out) *flags_out = vma_flags;
+
+    // No VMA found
+    if (vma_flags == 0)
+        return 0;
+
+    // Anonymous VMA — no backing store
+    if (!vn)
         return 0;
 
     // Anonymous / No backing vnode

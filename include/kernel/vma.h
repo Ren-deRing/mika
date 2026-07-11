@@ -64,7 +64,10 @@ void vma_merge_adjacent(struct vm_area **root, struct list_node *head,
 void vma_remove_range(struct vm_area **root, struct list_node *head,
                       uintptr_t start, uintptr_t end);
 
-uintptr_t vma_resolve_fault(struct proc *p, uintptr_t addr);
+void __vma_resolve_fault(struct proc *p, uintptr_t addr,
+                          struct vnode **vn_out, int64_t *offset_out,
+                          uint32_t *flags_out);
+uintptr_t vma_resolve_fault(struct proc *p, uintptr_t addr, uint32_t *flags_out);
 
 uintptr_t vma_shared_lookup(struct vnode *vn, int64_t offset);
 void vma_shared_register(struct vnode *vn, int64_t offset, uintptr_t phys);

@@ -20,22 +20,21 @@ spinlock_t g_proc_list_lock = SPINLOCK_INITIALIZER;
 
 
 struct thread* thread_create(struct proc *p, tid_t tid, void (*entry)(void *), void *arg) {
-    struct thread *t = kmalloc(sizeof(struct thread));
+    struct thread *t = kmalloc_aligned(sizeof(struct thread), 64);
     if (!t) return NULL;
 
     memset(t, 0, sizeof(struct thread));
     
     t->t_kstack = kstack_alloc();
     if (!t->t_kstack) {
-        kfree(t);
+        kfree_aligned(t);
         return NULL;
     }
 
     t->t_tid = tid;
     t->t_proc = p;
-    if (!p->p_threads) {
-        p->p_threads = t;
-    }
+    t->t_proc_next = p->p_threads;
+    p->p_threads = t;
     t->t_state = THREAD_READY;
     t->t_ticks = 0;
     t->t_need_resched = false;
@@ -48,7 +47,7 @@ struct thread* thread_create(struct proc *p, tid_t tid, void (*entry)(void *), v
 
     if (arch_thread_init(t) != 0) {
         kstack_free(t->t_kstack);
-        kfree(t);
+        kfree_aligned(t);
         return NULL;
     }
     
@@ -67,6 +66,17 @@ void proc_free(struct proc *p) {
             file_close(p->p_fd_table[i]);
             p->p_fd_table[i] = NULL;
         }
+    }
+
+    struct thread *t = p->p_threads;
+    while (t) {
+        struct thread *next = t->t_proc_next;
+        if (t->t_kstack) {
+            kstack_free(t->t_kstack);
+        }
+        arch_thread_destroy(t);
+        kfree_aligned(t);
+        t = next;
     }
 
     // 모든 VMA Free
@@ -98,7 +108,7 @@ struct proc* proc_create(pid_t pid) {
     p->p_pid = pid;
     spin_lock_init(&p->p_lock);
     spin_lock_init(&p->p_vm_lock);
-    spin_lock_init(&p->p_vma_lock);
+    rwsem_init(&p->p_vma_lock);
     p->p_active_cpus = 0;
 
     list_init(&p->p_children);
@@ -177,10 +187,16 @@ void proc_put(struct proc *p) {
 
     if (should_free) {
         uint64_t g_flags = spin_lock_irqsave(&g_proc_list_lock);
-        list_del(&p->p_list_link);
-        spin_unlock_irqrestore(&g_proc_list_lock, g_flags);
-
-        proc_free(p);
+        spin_lock(&p->p_lock);
+        bool still_zero = (p->p_refcnt == 0);
+        spin_unlock(&p->p_lock);
+        if (still_zero) {
+            list_del(&p->p_list_link);
+            spin_unlock_irqrestore(&g_proc_list_lock, g_flags);
+            proc_free(p);
+        } else {
+            spin_unlock_irqrestore(&g_proc_list_lock, g_flags);
+        }
     }
 }
 

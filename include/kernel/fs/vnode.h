@@ -36,8 +36,6 @@ struct vnode {
     struct vnode_ops *ops;
     struct mount     *mnt;
     void             *data;
-    spinlock_t        lock;         /* 메타데이터용 (v_reclaimable etc) */
-
     struct list_node  v_all;
     struct list_node  v_freelist;
     struct list_node  v_hash;
@@ -58,4 +56,3 @@ struct vnode* vnode_alloc(uint32_t type, struct vnode_ops *ops);
 int vfs_cached_lookup(struct vnode *dvp, const char *name, struct vnode **vpp);
 void vfs_hash_insert(struct vnode *dvp, const char *name, struct vnode *vp);
 void vput(struct vnode *vn);
-int vget(struct vnode *vp);

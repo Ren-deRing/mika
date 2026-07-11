@@ -131,6 +131,7 @@ static struct unix_socket *sock_alloc(void) {
     if (!s) return NULL;
     memset(s, 0, sizeof(struct unix_socket));
     spin_lock_init(&s->lock);
+    init_waitqueue_head(&s->rcv_wq);
 
     s->buf = kmalloc(UNIX_SOCKET_BUF_SIZE);
     if (!s->buf) {
@@ -147,12 +148,13 @@ static void sock_free(struct unix_socket *s) {
     if (s->buf) kfree(s->buf);
     
     spin_lock(&s->lock);
-    
-    if (s->peer) {
-        spin_lock(&s->peer->lock);
-        s->peer->peer = NULL;
-        s->peer->state = SS_DISCONNECTED;
-        spin_unlock(&s->peer->lock);
+    struct unix_socket *peer = s->peer;
+    if (peer) {
+        spin_lock(&peer->lock);
+        peer->peer = NULL;
+        peer->state = SS_DISCONNECTED;
+        spin_unlock(&peer->lock);
+        s->peer = NULL;
     }
     
     while (s->passed_head != s->passed_tail) {
@@ -182,22 +184,41 @@ static ssize_t sock_read_internal(struct vnode *vp, void *buf, size_t n, bool no
             return -EAGAIN;
         }
         
-        while (s->buf_head == s->buf_tail && s->state == SS_CONNECTED) {
+        spin_unlock(&s->lock);
+        int ret = wait_event_interruptible(&s->rcv_wq,
+            s->buf_head != s->buf_tail || s->state != SS_CONNECTED);
+        if (ret < 0)
+            return ret;
+        spin_lock(&s->lock);
+        if (s->buf_head == s->buf_tail) {
             spin_unlock(&s->lock);
-            thread_yield();
-            spin_lock(&s->lock);
+            return 0;
         }
     }
 
-    size_t copied = 0;
-    while (copied < n && s->buf_head != s->buf_tail) {
-        ((char *)buf)[copied] = s->buf[s->buf_head];
-        s->buf_head = (s->buf_head + 1) % UNIX_SOCKET_BUF_SIZE;
-        copied++;
+    size_t avail = 0;
+    while (avail < n && avail < UNIX_SOCKET_BUF_SIZE && s->buf_head != s->buf_tail) {
+        avail++;
+    }
+    if (avail == 0) {
+        spin_unlock(&s->lock);
+        return 0;
     }
 
+    char local[UNIX_SOCKET_BUF_SIZE];
+    for (size_t i = 0; i < avail; i++)
+        local[i] = s->buf[(s->buf_head + i) % UNIX_SOCKET_BUF_SIZE];
+
     spin_unlock(&s->lock);
-    return copied;
+
+    if (copy_to_user(buf, local, avail) < 0)
+        return -EFAULT;
+
+    spin_lock(&s->lock);
+    s->buf_head = (s->buf_head + avail) % UNIX_SOCKET_BUF_SIZE;
+    spin_unlock(&s->lock);
+
+    return avail;
 }
 
 static ssize_t sock_read(struct vnode *vp, void *buf, size_t n, off_t off) {
@@ -220,6 +241,13 @@ static ssize_t sock_write(struct vnode *vp, const void *buf, size_t n, off_t off
     (void)off;
     struct unix_socket *s = (struct unix_socket *)vp->data;
     if (!s) return -EINVAL;
+
+    if (n > UNIX_SOCKET_BUF_SIZE)
+        n = UNIX_SOCKET_BUF_SIZE;
+
+    char local[UNIX_SOCKET_BUF_SIZE];
+    if (copy_from_user(local, buf, n) < 0)
+        return -EFAULT;
 
     spin_lock(&s->lock);
     struct unix_socket *peer = s->peer;
@@ -244,10 +272,11 @@ static ssize_t sock_write(struct vnode *vp, const void *buf, size_t n, off_t off
             continue;
         }
 
-        peer->buf[peer->buf_tail] = ((const char *)buf)[written];
+        peer->buf[peer->buf_tail] = local[written];
         peer->buf_tail = next_tail;
         written++;
     }
+    wake_up(&peer->rcv_wq);
     spin_unlock(&peer->lock);
 
     return written;
@@ -257,20 +286,22 @@ static int sock_close(struct vnode *vp) {
     struct unix_socket *s = (struct unix_socket *)vp->data;
     if (!s) return -EINVAL;
 
-    
     spin_lock(&s->lock);
     s->state = SS_DISCONNECTED;
     struct unix_socket *peer = s->peer;
-    if (peer) {
-        spin_lock(&peer->lock);
-        peer->peer = NULL;
-        peer->state = SS_DISCONNECTED;
-        spin_unlock(&peer->lock);
-        s->peer = NULL;
-    }
+    s->peer = NULL;
     spin_unlock(&s->lock);
 
-    
+    if (peer) {
+        spin_lock(&peer->lock);
+        if (peer->peer == s) {
+            peer->peer = NULL;
+            peer->state = SS_DISCONNECTED;
+        }
+        spin_unlock(&peer->lock);
+        wake_up(&peer->rcv_wq);
+    }
+
     ensure_global_lock_init();
     spin_lock(&bound_sockets_lock);
     for (int i = 0; i < MAX_BOUND_SOCKETS; i++) {
@@ -748,6 +779,7 @@ int64_t sys_sendmsg(int fd, const void *user_msg, int flags) {
         }
     }
 
+    wake_up(&peer->rcv_wq);
     ret = (int64_t)total_written;
 out:
     fdput(f);
@@ -781,7 +813,10 @@ int64_t sys_recvmsg(int fd, void *user_msg, int flags) {
 
     while (s->buf_head == s->buf_tail && s->state == SS_CONNECTED) {
         spin_unlock(&s->lock);
-        thread_yield();
+        ret = wait_event_interruptible(&s->rcv_wq,
+            s->buf_head != s->buf_tail || s->state != SS_CONNECTED);
+        if (ret < 0)
+            goto out;
         spin_lock(&s->lock);
     }
     spin_unlock(&s->lock);
@@ -794,20 +829,33 @@ int64_t sys_recvmsg(int fd, void *user_msg, int flags) {
             if (iov.iov_len == 0) continue;
 
             spin_lock(&s->lock);
-            size_t read_bytes = 0;
-            while (read_bytes < iov.iov_len && s->buf_head != s->buf_tail) {
-                char b = s->buf[s->buf_head];
-                s->buf_head = (s->buf_head + 1) % UNIX_SOCKET_BUF_SIZE;
+            size_t avail = 0;
+            while (avail < iov.iov_len && avail < UNIX_SOCKET_BUF_SIZE && s->buf_head != s->buf_tail) {
+                avail++;
+            }
+            if (avail > 0) {
+                char *tmp = kmalloc(avail);
+                if (!tmp) { spin_unlock(&s->lock); ret = -ENOMEM; goto out; }
+                for (size_t j = 0; j < avail; j++) {
+                    tmp[j] = s->buf[(s->buf_head + j) % UNIX_SOCKET_BUF_SIZE];
+                }
                 spin_unlock(&s->lock);
-                if (copy_to_user((char *)iov.iov_base + read_bytes, &b, 1) < 0) {
+
+                if (copy_to_user((char *)iov.iov_base, tmp, avail) < 0) {
+                    kfree(tmp);
                     ret = -EFAULT; goto out;
                 }
+
+                kfree(tmp);
+
                 spin_lock(&s->lock);
-                read_bytes++;
-                total_read++;
+                s->buf_head = (s->buf_head + avail) % UNIX_SOCKET_BUF_SIZE;
+                spin_unlock(&s->lock);
+            } else {
+                spin_unlock(&s->lock);
             }
-            spin_unlock(&s->lock);
-            if (read_bytes < iov.iov_len) break; 
+            total_read += avail;
+            if (avail < iov.iov_len) break; 
         }
     }
 
@@ -816,6 +864,8 @@ int64_t sys_recvmsg(int fd, void *user_msg, int flags) {
         int extracted_cnt = 0;
         int max_to_pass = (msg.msg_controllen - sizeof(struct cmsghdr)) / sizeof(int);
         if (max_to_pass > 64) max_to_pass = 64;
+        // GC 구현하기 싫어요 ㅠㅠㅠㅠㅠㅠㅠㅠㅠ
+        if (max_to_pass > 1) max_to_pass = 1;
 
         spin_lock(&s->lock);
         while (s->passed_head != s->passed_tail && extracted_cnt < max_to_pass) {

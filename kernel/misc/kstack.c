@@ -28,5 +28,7 @@ void kstack_free(void* stack) {
     uintptr_t stack_bottom_virt = stack_start_virt - PAGE_SIZE;
     uintptr_t stack_bottom_phys = virt_to_phys((void*)stack_bottom_virt);
 
+    mmu_protect_page(mmu_get_kernel_map(), stack_bottom_virt, 3);
+
     page_free(phys_to_page(stack_bottom_phys), KSTACK_ORDER);
 }

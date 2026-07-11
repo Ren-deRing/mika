@@ -9,7 +9,7 @@
     .wait_lock = SPINLOCK_INITIALIZER, \
     .locked = 0, \
     .owner = NULL, \
-    .wait_queue = LIST_HEAD_INIT((name).wait_queue); \
+    .wait_queue = LIST_HEAD_INIT((name).wait_queue), \
 }
 
 void spin_lock_init(spinlock_t *lock);
@@ -97,3 +97,4 @@ void down_read(rw_semaphore_t *rwsem);
 void up_read(rw_semaphore_t *rwsem);
 void down_write(rw_semaphore_t *rwsem);
 void up_write(rw_semaphore_t *rwsem);
+void downgrade_write(rw_semaphore_t *rwsem);

@@ -48,7 +48,7 @@ void generic_main(void) {
                 char *init_argv[] = {"/bin/init", NULL};
                 char *init_envp[] = {NULL};
 
-                proc_exec(elf_buf, init_argv, init_envp);
+                proc_exec(elf_buf, size, init_argv, init_envp);
                 kfree(elf_buf);
             }
         }

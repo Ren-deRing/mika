@@ -1,5 +1,6 @@
 #include <kernel/proc.h>
 #include <kernel/kmem.h>
+#include <kernel/kstack.h>
 #include <kernel/cpu.h>
 #include "x86.h"
 #include <uapi/errno.h>
@@ -16,7 +17,8 @@ struct thread* arch_init_first_thread(void) {
     struct thread *t0 = kmalloc_aligned(sizeof(struct thread), 64);
     memset(t0, 0, sizeof(struct thread));
 
-    void *new_stack = kmalloc_aligned(KSTACK_SIZE, KSTACK_SIZE);
+    void *new_stack = kstack_alloc();
+    if (!new_stack) return NULL;
     t0->t_kstack = new_stack;
     t0->t_tid = 0;
     t0->t_proc = p0;
@@ -45,7 +47,8 @@ struct thread* arch_init_ap_thread(uint32_t cpu_id) {
     struct thread *t = kmalloc_aligned(sizeof(struct thread), 64);
     memset(t, 0, sizeof(struct thread));
 
-    void *new_stack = kmalloc_aligned(KSTACK_SIZE, KSTACK_SIZE);
+    void *new_stack = kstack_alloc();
+    if (!new_stack) return NULL;
     t->t_kstack = new_stack;
     t->t_tid = 0;
     t->t_proc = p0;
@@ -128,7 +131,7 @@ int arch_thread_init(struct thread *t) {
 
 void arch_thread_destroy(struct thread *t) {
     if (t->t_arch_data) {
-        kfree(t->t_arch_data);
+        kfree_aligned(t->t_arch_data);
         t->t_arch_data = NULL;
     }
 }
@@ -166,7 +169,7 @@ int arch_thread_fork(struct thread *child_t, struct thread *parent_t) {
     uintptr_t kstack_top = (uintptr_t)child_t->t_kstack + KSTACK_SIZE;
 
     if (!parent_t->t_trapframe) {
-        kfree(child_t->t_arch_data);
+        kfree_aligned(child_t->t_arch_data);
         return -EINVAL;
     }
 

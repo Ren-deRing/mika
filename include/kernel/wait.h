@@ -45,8 +45,10 @@ static inline void remove_wait_queue(wait_queue_head_t *wq, struct thread *t) {
             __t->t_state = THREAD_WAITING;                               \
             add_wait_queue(wq, __t);                                     \
             __sync_synchronize();                                        \
-            if (condition)                                               \
+            if (condition) {                                             \
+                __t->t_state = THREAD_READY;                               \
                 break;                                                   \
+            }                                                               \
             thread_yield();                                              \
         }                                                                \
         remove_wait_queue(wq, curthread);                                \
@@ -60,9 +62,12 @@ static inline void remove_wait_queue(wait_queue_head_t *wq, struct thread *t) {
             __t->t_state = THREAD_WAITING;                               \
             add_wait_queue(wq, __t);                                     \
             __sync_synchronize();                                        \
-            if (condition)                                               \
+            if (condition) {                                             \
+                __t->t_state = THREAD_READY;                               \
                 break;                                                   \
-                    if (__t->t_sig_pending) {                                    \
+            }                                                               \
+            if (__t->t_sig_pending) {                                    \
+                __t->t_state = THREAD_READY;                               \
                 __ret = -EINTR;                                              \
                 break;                                                   \
             }                                                            \

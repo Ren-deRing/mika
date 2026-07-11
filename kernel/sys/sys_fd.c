@@ -201,6 +201,8 @@ static ssize_t signalfd_read(struct vnode *vp, void *buf, size_t count, off_t of
     while (1) {
         spin_lock(&sb->lock);
         uint32_t signo = 0;
+        struct proc *p = curproc;
+        uint64_t pflags = spin_lock_irqsave(&p->p_lock);
         uint64_t pending = curthread->t_sig_pending & sb->mask;
         if (pending != 0) {
             for (int i = 1; i <= 64; i++) {
@@ -211,6 +213,7 @@ static ssize_t signalfd_read(struct vnode *vp, void *buf, size_t count, off_t of
                 }
             }
         }
+        spin_unlock_irqrestore(&p->p_lock, pflags);
         spin_unlock(&sb->lock);
 
         if (signo > 0) {

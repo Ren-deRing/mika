@@ -11,6 +11,8 @@
 #include <string.h>
 #include <kernel/printf.h>
 
+#include <kernel/kstack.h>
+
 extern void arch_context_switch(struct thread *prev, struct thread *next);
 
 #define MLFQ_LEVELS 4
@@ -176,16 +178,22 @@ __attribute__((unused)) static void dump_mlfq_queues(void) {
 void thread_post_switch_hook(void) {
     struct thread *last = curcpu->prev_thread;
     if (last) {
-        if (last->t_state == THREAD_RUNNING && last->t_tid != 0) {
-            sched_enqueue(last);
-        }
-        
-        curcpu->prev_thread = NULL;
-
         if (last->t_lock_to_release) {
             spin_unlock(last->t_lock_to_release);
             last->t_lock_to_release = NULL;
         }
+
+        if (last->t_state == THREAD_RUNNING && last->t_tid != 0) {
+            sched_enqueue(last);
+        } else if (last->t_state == THREAD_ZOMBIE) {
+            if (last->t_kstack) {
+                kstack_free(last->t_kstack);
+            }
+            arch_thread_destroy(last);
+            kfree_aligned(last);
+        }
+        
+        curcpu->prev_thread = NULL;
     }
 }
 
@@ -380,9 +388,6 @@ void thread_signal_wakeup(struct thread *t) {
             }
         }
     } else if (t->t_state == THREAD_WAITING) {
-        if (t->t_wait_node.next && t->t_wait_node.prev) {
-            list_del(&t->t_wait_node);
-        }
         sched_enqueue(t);
     }
 

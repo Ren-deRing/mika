@@ -442,6 +442,7 @@ int64_t sys_ioctl_impl(int fd, uint64_t request_raw, void *arg) {
                 fb_fix.line_length = g_boot_info.fb.pitch;
                 if (!is_user_address_range(arg, sizeof(fb_fix))) { ret = -EFAULT; goto done; }
                 if (copy_to_user(arg, &fb_fix, sizeof(fb_fix)) < 0) { ret = -EFAULT; goto done; }
+                ret = 0; goto done;
             }
         }
         else if (strcmp(f->f_vn->v_name, "card0") == 0) {

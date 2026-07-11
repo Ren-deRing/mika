@@ -15,7 +15,6 @@ struct file *file_alloc(void) {
 
     memset(f, 0, sizeof(struct file));
     f->f_refcnt = 1;
-    spin_lock_init(&f->f_lock);
 
     return f;
 }
@@ -39,18 +38,3 @@ void file_close(struct file *f) {
     }
 }
 
-void file_lock(struct file *f) {
-    spin_lock(&f->f_lock);
-}
-
-void file_unlock(struct file *f) {
-    spin_unlock(&f->f_lock);
-}
-
-void file_lock_irqsave(struct file *f, uint64_t *flags) {
-    *flags = spin_lock_irqsave(&f->f_lock);
-}
-
-void file_unlock_irqrestore(struct file *f, uint64_t flags) {
-    spin_unlock_irqrestore(&f->f_lock, flags);
-}

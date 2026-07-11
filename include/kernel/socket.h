@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 #include <kernel/lock.h>
+#include <kernel/wait.h>
 
 struct file;
 struct vnode;
@@ -23,6 +24,7 @@ struct unix_socket {
     char path[108];
     struct unix_socket *peer;
     spinlock_t lock;
+    wait_queue_head_t rcv_wq;
     struct unix_socket *backlog[UNIX_SOCKET_MAX_BACKLOG];
     int backlog_head;
     int backlog_tail;

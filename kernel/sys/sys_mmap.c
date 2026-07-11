@@ -207,6 +207,8 @@ int64_t sys_mmap(uintptr_t addr, size_t length, int prot, int flags, int fd, int
     }
 
     if (need_search) {
+        down_write(&curproc->p_vma_lock);
+
         uintptr_t search_start = 0x400000000000;
         uintptr_t found_addr = 0;
 
@@ -214,7 +216,7 @@ int64_t sys_mmap(uintptr_t addr, size_t length, int prot, int flags, int fd, int
             bool range_free = true;
             uintptr_t search_end = search_start + aligned_len;
 
-            // PTE 체크
+            // PTE 체크 (atomic read on x86_64 — no lock needed)
             for (uintptr_t off = 0; off < aligned_len; off += PAGE_SIZE) {
                 if (mmu_is_mapped(curproc->p_vm_map, search_start + off)) {
                     range_free = false;
@@ -224,14 +226,12 @@ int64_t sys_mmap(uintptr_t addr, size_t length, int prot, int flags, int fd, int
             }
             if (!range_free) continue;
 
-            // VMA 체크
-            uint64_t lk = spin_lock_irqsave(&curproc->p_vma_lock);
+            // VMA 체크 (lock already held)
             struct vm_area *existing = vma_find_first(curproc->p_vma_root, search_start);
             if (existing && existing->start < search_end) {
                 range_free = false;
                 search_start = ALIGN_UP(existing->end, PAGE_SIZE);
             }
-            spin_unlock_irqrestore(&curproc->p_vma_lock, lk);
             if (!range_free) continue;
 
             found_addr = search_start;
@@ -241,33 +241,8 @@ int64_t sys_mmap(uintptr_t addr, size_t length, int prot, int flags, int fd, int
         if (found_addr != 0) {
             addr = found_addr;
         } else {
-            uintptr_t fallback_start = curproc->p_mmap_base;
-            while (1) {
-                bool range_free = true;
-                uintptr_t search_end = fallback_start + aligned_len;
-
-                for (uintptr_t off = 0; off < aligned_len; off += PAGE_SIZE) {
-                    if (mmu_is_mapped(curproc->p_vm_map, fallback_start + off)) {
-                        range_free = false;
-                        fallback_start = ALIGN_UP(fallback_start + off + PAGE_SIZE, PAGE_SIZE);
-                        break;
-                    }
-                }
-                if (!range_free) continue;
-
-                uint64_t lk = spin_lock_irqsave(&curproc->p_vma_lock);
-                struct vm_area *existing = vma_find_first(curproc->p_vma_root, fallback_start);
-                if (existing && existing->start < search_end) {
-                    range_free = false;
-                    fallback_start = ALIGN_UP(existing->end, PAGE_SIZE);
-                }
-                spin_unlock_irqrestore(&curproc->p_vma_lock, lk);
-                if (!range_free) continue;
-
-                break;
-            }
-            addr = fallback_start;
-            curproc->p_mmap_base = fallback_start + aligned_len;
+            addr = curproc->p_mmap_base;
+            curproc->p_mmap_base += aligned_len;
         }
     }
 
@@ -295,16 +270,17 @@ int64_t sys_mmap(uintptr_t addr, size_t length, int prot, int flags, int fd, int
     int64_t file_offset_val = (int64_t)offset - (int64_t)(addr & (PAGE_SIZE - 1));
     struct vm_area *vma = vma_alloc(start, end, mmu_flags, mapped_vn, file_offset_val);
     if (mapped_vn) vput(mapped_vn);
-    if (!vma) return -ENOMEM;
+    if (!vma) { if (need_search) up_write(&curproc->p_vma_lock); return -ENOMEM; }
 
-    // VMA 설치
-    uint64_t vma_lk = spin_lock_irqsave(&curproc->p_vma_lock);
+    // VMA 설치 (lock already held for need_search)
+    if (!need_search) down_write(&curproc->p_vma_lock);
     if (map_fixed) {
         vma_remove_range(&curproc->p_vma_root, &curproc->p_vma_list, start, end);
     }
     vma_insert(&curproc->p_vma_root, &curproc->p_vma_list, vma);
-    spin_unlock_irqrestore(&curproc->p_vma_lock, vma_lk);
+    up_write(&curproc->p_vma_lock);
 
+    // dprintf("[mmap] addr=0x%lx\n", addr);
     return addr;
 }
 
@@ -317,13 +293,13 @@ int64_t sys_munmap(void *addr, size_t length) {
     uintptr_t end = ALIGN_UP(uaddr + length, PAGE_SIZE);
     page_table_t *map = curproc->p_vm_map;
 
-    uint64_t vma_lk = spin_lock_irqsave(&curproc->p_vma_lock);
-    vma_remove_range(&curproc->p_vma_root, &curproc->p_vma_list, start, end);
-    spin_unlock_irqrestore(&curproc->p_vma_lock, vma_lk);
-
     for (uintptr_t i = start; i < end; i += PAGE_SIZE) {
         mmu_unmap(map, i);
     }
+
+    down_write(&curproc->p_vma_lock);
+    vma_remove_range(&curproc->p_vma_root, &curproc->p_vma_list, start, end);
+    up_write(&curproc->p_vma_lock);
 
     return 0;
 }
@@ -342,31 +318,34 @@ int64_t sys_brk(uintptr_t brk) {
             return old_brk;
         }
 
-        uint64_t vma_lk = spin_lock_irqsave(&curproc->p_vma_lock);
+        down_write(&curproc->p_vma_lock);
+        struct vm_area *existing = vma_find(curproc->p_vma_root, start);
+        if (existing && existing->start < end && existing->end > old_brk) {
+            up_write(&curproc->p_vma_lock);
+            return old_brk;
+        }
         struct vm_area *heap_vma = vma_find(curproc->p_vma_root, old_brk - 1);
         if (heap_vma && heap_vma->end == old_brk && heap_vma->vn == NULL) {
-            vma_erase(&curproc->p_vma_root, &curproc->p_vma_list, heap_vma);
             heap_vma->end = end;
-            vma_insert(&curproc->p_vma_root, &curproc->p_vma_list, heap_vma);
         } else {
             struct vm_area *vma = vma_alloc(start, end,
                 MMU_FLAGS_USER | MMU_FLAGS_READ | MMU_FLAGS_WRITE, NULL, 0);
             if (vma) {
                 vma_insert(&curproc->p_vma_root, &curproc->p_vma_list, vma);
             } else {
-                spin_unlock_irqrestore(&curproc->p_vma_lock, vma_lk);
+                up_write(&curproc->p_vma_lock);
                 return old_brk;
             }
         }
-        spin_unlock_irqrestore(&curproc->p_vma_lock, vma_lk);
+        up_write(&curproc->p_vma_lock);
     } else if (brk < old_brk) {
         uintptr_t start = ALIGN_UP(brk, PAGE_SIZE);
         uintptr_t end = ALIGN_UP(old_brk, PAGE_SIZE);
         page_table_t *map = curproc->p_vm_map;
 
-        uint64_t vma_lk = spin_lock_irqsave(&curproc->p_vma_lock);
+        down_write(&curproc->p_vma_lock);
         vma_remove_range(&curproc->p_vma_root, &curproc->p_vma_list, start, end);
-        spin_unlock_irqrestore(&curproc->p_vma_lock, vma_lk);
+        up_write(&curproc->p_vma_lock);
 
         for (uintptr_t i = start; i < end; i += PAGE_SIZE) {
             mmu_unmap(map, i);
@@ -389,6 +368,8 @@ int64_t sys_mprotect(uintptr_t start, size_t len, int prot) {
     if (len == 0) return 0;
     if (!is_user_address_range((void *)start, len)) return -EINVAL;
 
+    // dprintf("[m] start=0x%lx len=%zu\n", start, len);
+
     uintptr_t addr = ALIGN_DOWN(start, PAGE_SIZE);
     uintptr_t end = ALIGN_UP(start + len, PAGE_SIZE);
     if (addr >= end) return -EINVAL;
@@ -396,15 +377,15 @@ int64_t sys_mprotect(uintptr_t start, size_t len, int prot) {
 
     for (uintptr_t i = addr; i < end; i += PAGE_SIZE) {
         if (mmu_translate(map, i) == 0) {
-            uint64_t lk = spin_lock_irqsave(&curproc->p_vma_lock);
+            down_read(&curproc->p_vma_lock);
             struct vm_area *vma = vma_find(curproc->p_vma_root, i);
-            spin_unlock_irqrestore(&curproc->p_vma_lock, lk);
+            up_read(&curproc->p_vma_lock);
             if (!vma) return -ENOMEM;
         }
     }
 
     uint32_t vma_flags = prot_to_vma_flags(prot);
-    uint64_t vma_lk = spin_lock_irqsave(&curproc->p_vma_lock);
+    down_write(&curproc->p_vma_lock);
 
     struct vm_area *vma = vma_find_first(curproc->p_vma_root, addr);
     while (vma && vma->start < end) {
@@ -414,18 +395,21 @@ int64_t sys_mprotect(uintptr_t start, size_t len, int prot) {
             vma = vma_split(&curproc->p_vma_root, &curproc->p_vma_list, vma, addr);
             if (!vma) break;
         }
-
         if (vma->end > end) {
             struct vm_area *right = vma_split(&curproc->p_vma_root, &curproc->p_vma_list, vma, end);
             if (!right) break;
         }
-
-        vma->flags = (vma->flags & ~(MMU_FLAGS_READ|MMU_FLAGS_WRITE|MMU_FLAGS_EXEC)) | vma_flags;
-
         vma = vma_next(vma);
     }
 
-    spin_unlock_irqrestore(&curproc->p_vma_lock, vma_lk);
+    vma = vma_find_first(curproc->p_vma_root, addr);
+    while (vma && vma->start < end) {
+        if ((struct list_node *)vma == &curproc->p_vma_list) break;
+        vma->flags = (vma->flags & ~(MMU_FLAGS_READ|MMU_FLAGS_WRITE|MMU_FLAGS_EXEC)) | vma_flags;
+        vma = vma_next(vma);
+    }
+
+    up_write(&curproc->p_vma_lock);
 
     // 페이지 매핑/보호 (demand paging 지원)
     for (uintptr_t i = addr; i < end; i += PAGE_SIZE) {
@@ -487,14 +471,14 @@ int64_t sys_mremap(uintptr_t old_addr, size_t old_size, size_t new_size, int fla
     bool is_shared_file = false;
 
     // VMA 먼저 시도
-    uint64_t vma_lk = spin_lock_irqsave(&curproc->p_vma_lock);
+    down_write(&curproc->p_vma_lock);
     struct vm_area *old_vma = vma_find(curproc->p_vma_root, old_addr);
     if (old_vma && old_vma->vn && (old_vma->flags & MMU_FLAGS_SHARED)) {
         orig_vn = old_vma->vn;
         orig_offset = old_vma->file_offset;
         is_shared_file = true;
     }
-    spin_unlock_irqrestore(&curproc->p_vma_lock, vma_lk);
+    up_write(&curproc->p_vma_lock);
 
     bool can_extend_inplace = true;
     for (uintptr_t i = old_addr + aligned_old; i < old_addr + aligned_new; i += PAGE_SIZE) {
@@ -614,14 +598,14 @@ int64_t sys_mremap(uintptr_t old_addr, size_t old_size, size_t new_size, int fla
             }
         }
 
-        uint64_t vma_lk = spin_lock_irqsave(&curproc->p_vma_lock);
+        down_write(&curproc->p_vma_lock);
         struct vm_area *vma = vma_find(curproc->p_vma_root, old_addr);
         if (vma && vma->start == old_addr && vma->end == old_addr + aligned_old && vma->vn == NULL) {
             vma_erase(&curproc->p_vma_root, &curproc->p_vma_list, vma);
             vma->end = old_addr + aligned_new;
             vma_insert(&curproc->p_vma_root, &curproc->p_vma_list, vma);
         }
-        spin_unlock_irqrestore(&curproc->p_vma_lock, vma_lk);
+        up_write(&curproc->p_vma_lock);
 
         return old_addr;
     }

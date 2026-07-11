@@ -25,7 +25,7 @@ void arch_user_trampoline(void *arg) {
     arch_enter_user_mode(p->p_entry, self->t_user_stack_top);
 }
 
-int proc_exec(void *elf_data, char *const argv[], char *const envp[]) {
+int proc_exec(void *elf_data, size_t elf_size, char *const argv[], char *const envp[]) {
     Elf64_Ehdr *ehdr = (Elf64_Ehdr *)elf_data;
     uintptr_t main_binary_base = (ehdr->e_type == ET_DYN) ? 0x00400000 : 0;
     uintptr_t original_entry = ehdr->e_entry + main_binary_base;
@@ -35,7 +35,7 @@ int proc_exec(void *elf_data, char *const argv[], char *const envp[]) {
     uint64_t phnum = 0;
     uintptr_t interpreter_base = 0;
 
-    page_table_t *new_map = load_elf(elf_data, &entry_point, &brk, &phdr_vaddr, &phnum, &interpreter_base);
+    page_table_t *new_map = load_elf(elf_data, elf_size, &entry_point, &brk, &phdr_vaddr, &phnum, &interpreter_base);
     if (!new_map) {
         return -ENOEXEC;
     }
@@ -52,9 +52,9 @@ int proc_exec(void *elf_data, char *const argv[], char *const envp[]) {
     struct vm_area *stack_vma = vma_alloc(stack_bottom, stack_top,
         MMU_FLAGS_USER | MMU_FLAGS_READ | MMU_FLAGS_WRITE, NULL, 0);
     if (stack_vma) {
-        uint64_t vma_lk = spin_lock_irqsave(&p->p_vma_lock);
+        down_write(&p->p_vma_lock);
         vma_insert(&p->p_vma_root, &p->p_vma_list, stack_vma);
-        spin_unlock_irqrestore(&p->p_vma_lock, vma_lk);
+        up_write(&p->p_vma_lock);
     }
 
     uintptr_t final_rsp = setup_user_stack(new_map, USER_STACK_TOP, argv, envp, phdr_vaddr, phnum, interpreter_base, original_entry);
@@ -104,6 +104,7 @@ uintptr_t setup_user_stack(page_table_t *new_map, uintptr_t user_stack_top,
                            uintptr_t phdr_vaddr, uint64_t phnum,
                            uintptr_t interpreter_base, uintptr_t original_entry) {
     uint8_t *kbuf = kmalloc(TMP_STACK_SIZE);
+    if (!kbuf) return 0;
     memset(kbuf, 0, TMP_STACK_SIZE);
 
     int argc = 0; if (argv) { while (argv[argc]) argc++; }

@@ -18,16 +18,26 @@ static uint32_t elf_pflags_to_mmu(uint32_t p_flags) {
     return flags;
 }
 
-page_table_t* load_elf(void *elf_data, uintptr_t *out_entry, uintptr_t *out_brk, 
+page_table_t* load_elf(void *elf_data, size_t elf_size,
+                       uintptr_t *out_entry, uintptr_t *out_brk, 
                       uintptr_t *out_phdr_vaddr, uint64_t *out_phnum,
                       uintptr_t *out_interpreter_base) {
     Elf64_Ehdr *ehdr = (Elf64_Ehdr *)elf_data;
+
+    if (elf_size < sizeof(Elf64_Ehdr))
+        return NULL;
 
     if (memcmp(ehdr->e_ident, ELFMAG, SELFMAG) != 0 ||
         ehdr->e_ident[EI_CLASS] != ELFCLASS64) {
         return NULL;
     }
-    
+
+    if (ehdr->e_phoff > UINT64_MAX - ehdr->e_phnum * sizeof(Elf64_Phdr))
+        return NULL;
+
+    if (ehdr->e_phoff + ehdr->e_phnum * sizeof(Elf64_Phdr) > elf_size)
+        return NULL;
+
     Elf64_Phdr *phdrs = (Elf64_Phdr *)((uintptr_t)elf_data + ehdr->e_phoff);
     Elf64_Phdr *interp_phdr = NULL;
 
@@ -82,6 +92,12 @@ page_table_t* load_elf(void *elf_data, uintptr_t *out_entry, uintptr_t *out_brk,
             uintptr_t vaddr = main_binary_base + phdrs[i].p_vaddr;
             size_t file_size = phdrs[i].p_filesz;
             uintptr_t file_offset = phdrs[i].p_offset;
+
+            if (file_offset > UINT64_MAX - file_size)
+                { mmu_destroy_map(new_map); return NULL; }
+
+            if (file_offset + file_size > elf_size)
+                { mmu_destroy_map(new_map); return NULL; }
 
             size_t written = 0;
             while (written < file_size) {
@@ -220,6 +236,10 @@ page_table_t* load_elf(void *elf_data, uintptr_t *out_entry, uintptr_t *out_brk,
         size_t file_size = phdrs[i].p_filesz;
         uintptr_t file_offset = phdrs[i].p_offset;
 
+        if (file_offset > UINT64_MAX - file_size) {
+            mmu_destroy_map(new_map); kfree(interp_data); return NULL;
+        }
+
         size_t written = 0;
         while (written < file_size) {
             uintptr_t curr_v = vaddr + written;
@@ -279,6 +299,10 @@ page_table_t* load_elf(void *elf_data, uintptr_t *out_entry, uintptr_t *out_brk,
         uintptr_t vaddr = interp_base + iphdrs[j].p_vaddr;
         size_t file_size = iphdrs[j].p_filesz;
         uintptr_t file_offset = iphdrs[j].p_offset;
+
+        if (file_offset > UINT64_MAX - file_size) {
+            mmu_destroy_map(new_map); kfree(interp_data); return NULL;
+        }
 
         size_t written = 0;
         while (written < file_size) {

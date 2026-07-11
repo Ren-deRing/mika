@@ -4,6 +4,7 @@
 #include <kernel/proc.h>
 #include <kernel/lock.h>
 #include <kernel/printf.h>
+#include <kernel/kmem.h>
 #include <string.h>
 
 #define MAX_SHM_SEGMENTS 64
@@ -12,7 +13,7 @@
 #define USER_ADDR_LIMIT  0x0000800000000000UL
 
 struct shm_segment_internal {
-    int id;                // shmid
+    int id;
     key_t key;
     size_t size;
     size_t num_pages;
@@ -47,6 +48,28 @@ static inline bool is_user_address_range(const void *addr, size_t size) {
 }
 
 int64_t sys_shmget(key_t key, size_t size, int shmflg) {
+    if (size == 0) return -EINVAL;
+
+    size_t aligned_size = ALIGN_UP(size, PAGE_SIZE);
+    size_t num_pages = aligned_size / PAGE_SIZE;
+    if (num_pages > MAX_SHM_PAGES_PER_SEGMENT) return -EINVAL;
+
+    page_t **pages = kmalloc(MAX_SHM_PAGES_PER_SEGMENT * sizeof(page_t *));
+    if (!pages) return -ENOMEM;
+
+    for (size_t p = 0; p < num_pages; p++) {
+        page_t *pg = page_alloc(0);
+        if (!pg) {
+            for (size_t r = 0; r < p; r++)
+                page_free(pages[r], 0);
+            kfree(pages);
+            return -ENOMEM;
+        }
+        pg->ref_count = 1;
+        pages[p] = pg;
+        memset(phys_to_virt(page_to_phys(pg)), 0, PAGE_SIZE);
+    }
+
     uint64_t flags = spin_lock_irqsave(&shm_lock);
 
     if (key != IPC_PRIVATE) {
@@ -54,14 +77,23 @@ int64_t sys_shmget(key_t key, size_t size, int shmflg) {
             if (shm_segments[i].active && shm_segments[i].key == key) {
                 if ((shmflg & IPC_CREAT) && (shmflg & IPC_EXCL)) {
                     spin_unlock_irqrestore(&shm_lock, flags);
+                    for (size_t p = 0; p < num_pages; p++)
+                        page_free(pages[p], 0);
+                    kfree(pages);
                     return -EEXIST;
                 }
                 if (size > shm_segments[i].size) {
                     spin_unlock_irqrestore(&shm_lock, flags);
+                    for (size_t p = 0; p < num_pages; p++)
+                        page_free(pages[p], 0);
+                    kfree(pages);
                     return -EINVAL;
                 }
                 int id = shm_segments[i].id;
                 spin_unlock_irqrestore(&shm_lock, flags);
+                for (size_t p = 0; p < num_pages; p++)
+                    page_free(pages[p], 0);
+                kfree(pages);
                 return id;
             }
         }
@@ -69,20 +101,10 @@ int64_t sys_shmget(key_t key, size_t size, int shmflg) {
 
     if (!(shmflg & IPC_CREAT) && key != IPC_PRIVATE) {
         spin_unlock_irqrestore(&shm_lock, flags);
+        for (size_t p = 0; p < num_pages; p++)
+            page_free(pages[p], 0);
+        kfree(pages);
         return -ENOENT;
-    }
-
-    if (size == 0) {
-        spin_unlock_irqrestore(&shm_lock, flags);
-        return -EINVAL;
-    }
-
-    size_t aligned_size = ALIGN_UP(size, PAGE_SIZE);
-    size_t num_pages = aligned_size / PAGE_SIZE;
-
-    if (num_pages > MAX_SHM_PAGES_PER_SEGMENT) {
-        spin_unlock_irqrestore(&shm_lock, flags);
-        return -EINVAL;
     }
 
     int slot = -1;
@@ -95,31 +117,22 @@ int64_t sys_shmget(key_t key, size_t size, int shmflg) {
 
     if (slot == -1) {
         spin_unlock_irqrestore(&shm_lock, flags);
+        for (size_t p = 0; p < num_pages; p++)
+            page_free(pages[p], 0);
+        kfree(pages);
         return -ENOMEM;
     }
 
     struct shm_segment_internal *seg = &shm_segments[slot];
     memset(seg, 0, sizeof(*seg));
-
-    for (size_t p = 0; p < num_pages; p++) {
-        page_t *pg = page_alloc(0);
-        if (!pg) {
-            for (size_t r = 0; r < p; r++) {
-                page_free(seg->pages[r], 0);
-            }
-            spin_unlock_irqrestore(&shm_lock, flags);
-            return -ENOMEM;
-        }
-        pg->ref_count = 1;
-        seg->pages[p] = pg;
-        uintptr_t paddr = page_to_phys(pg);
-        memset(phys_to_virt(paddr), 0, PAGE_SIZE);
-    }
+    for (size_t p = 0; p < num_pages; p++)
+        seg->pages[p] = pages[p];
+    seg->num_pages = num_pages;
+    kfree(pages);
 
     seg->id = next_shmid++;
     seg->key = key;
     seg->size = size;
-    seg->num_pages = num_pages;
     seg->active = true;
 
     seg->ds.shm_perm.__key = key;
@@ -154,9 +167,10 @@ void* sys_shmat(int shmid, const void *shmaddr, int shmflg) {
         return (void*)-EINVAL;
     }
 
-    size_t aligned_len = seg->num_pages * PAGE_SIZE;
-    uintptr_t map_addr = 0;
+    size_t num_pages = seg->num_pages;
+    size_t aligned_len = num_pages * PAGE_SIZE;
 
+    uintptr_t map_addr = 0;
     if (shmaddr != NULL) {
         uintptr_t req_addr = (uintptr_t)shmaddr;
         if (shmflg & SHM_RND) {
@@ -165,12 +179,10 @@ void* sys_shmat(int shmid, const void *shmaddr, int shmflg) {
             spin_unlock_irqrestore(&shm_lock, flags);
             return (void*)-EINVAL;
         }
-
         if (!is_user_address_range((void*)req_addr, aligned_len)) {
             spin_unlock_irqrestore(&shm_lock, flags);
             return (void*)-EINVAL;
         }
-
         for (size_t offset = 0; offset < aligned_len; offset += PAGE_SIZE) {
             if (mmu_translate(curproc->p_vm_map, req_addr + offset) != 0) {
                 spin_unlock_irqrestore(&shm_lock, flags);
@@ -201,16 +213,14 @@ void* sys_shmat(int shmid, const void *shmaddr, int shmflg) {
     }
 
     uint64_t map_flags = MMU_FLAGS_USER | MMU_FLAGS_READ | MMU_FLAGS_SHARED;
-    if (!(shmflg & SHM_RDONLY)) {
+    if (!(shmflg & SHM_RDONLY))
         map_flags |= MMU_FLAGS_WRITE;
-    }
 
-    for (size_t p = 0; p < seg->num_pages; p++) {
+    for (size_t p = 0; p < num_pages; p++) {
         uintptr_t phys_addr = page_to_phys(seg->pages[p]);
         if (!mmu_map_4k(curproc->p_vm_map, map_addr + (p * PAGE_SIZE), phys_addr, map_flags)) {
-            for (size_t r = 0; r < p; r++) {
+            for (size_t r = 0; r < p; r++)
                 mmu_unmap(curproc->p_vm_map, map_addr + (r * PAGE_SIZE));
-            }
             spin_unlock_irqrestore(&shm_lock, flags);
             return (void*)-ENOMEM;
         }
@@ -225,9 +235,8 @@ void* sys_shmat(int shmid, const void *shmaddr, int shmflg) {
     }
 
     if (attach_slot == -1) {
-        for (size_t p = 0; p < seg->num_pages; p++) {
+        for (size_t p = 0; p < num_pages; p++)
             mmu_unmap(curproc->p_vm_map, map_addr + (p * PAGE_SIZE));
-        }
         spin_unlock_irqrestore(&shm_lock, flags);
         return (void*)-ENOMEM;
     }
@@ -247,18 +256,23 @@ void* sys_shmat(int shmid, const void *shmaddr, int shmflg) {
 }
 
 int64_t sys_shmdt(const void *shmaddr) {
+    uintptr_t addr = (uintptr_t)shmaddr;
+    if (addr % PAGE_SIZE != 0) return -EINVAL;
+
+    bool do_free = false;
+    bool has_seg_info = false;
+    int attach_slot = -1;
+    int shmid = 0;
+    size_t num_pages = 0;
+
+    page_t **pages = kmalloc(MAX_SHM_PAGES_PER_SEGMENT * sizeof(page_t *));
+    if (!pages) return -ENOMEM;
+
     uint64_t flags = spin_lock_irqsave(&shm_lock);
 
-    uintptr_t addr = (uintptr_t)shmaddr;
-    if (addr % PAGE_SIZE != 0) {
-        spin_unlock_irqrestore(&shm_lock, flags);
-        return -EINVAL;
-    }
-
-    int attach_slot = -1;
     for (int i = 0; i < MAX_SHM_ATTACHMENTS; i++) {
-        if (shm_attachments[i].active && 
-            shm_attachments[i].pid == curproc->p_pid && 
+        if (shm_attachments[i].active &&
+            shm_attachments[i].pid == curproc->p_pid &&
             shm_attachments[i].vaddr == addr) {
             attach_slot = i;
             break;
@@ -267,10 +281,11 @@ int64_t sys_shmdt(const void *shmaddr) {
 
     if (attach_slot == -1) {
         spin_unlock_irqrestore(&shm_lock, flags);
+        kfree(pages);
         return -EINVAL;
     }
 
-    int shmid = shm_attachments[attach_slot].shmid;
+    shmid = shm_attachments[attach_slot].shmid;
 
     struct shm_segment_internal *seg = NULL;
     for (int i = 0; i < MAX_SHM_SEGMENTS; i++) {
@@ -280,31 +295,36 @@ int64_t sys_shmdt(const void *shmaddr) {
         }
     }
 
-    if (!seg) {
-        spin_unlock_irqrestore(&shm_lock, flags);
-        return -EINVAL;
-    }
+    if (seg) {
+        num_pages = seg->num_pages;
+        for (size_t pg = 0; pg < num_pages; pg++) {
+            pages[pg] = seg->pages[pg];
+        }
 
-    for (size_t p = 0; p < seg->num_pages; p++) {
-        mmu_unmap(curproc->p_vm_map, addr + (p * PAGE_SIZE));
+        if (seg->ds.shm_nattch > 0)
+            seg->ds.shm_nattch--;
+
+        do_free = seg->marked_for_deletion && seg->ds.shm_nattch == 0;
+        if (do_free)
+            seg->active = false;
+        
+        has_seg_info = true; 
     }
 
     shm_attachments[attach_slot].active = false;
-
-    if (seg->ds.shm_nattch > 0) {
-        seg->ds.shm_nattch--;
-    }
-    seg->ds.shm_dtime = 0;
-    seg->ds.shm_lpid = curproc->p_pid;
-
-    if (seg->marked_for_deletion && seg->ds.shm_nattch == 0) {
-        for (size_t p = 0; p < seg->num_pages; p++) {
-            page_free(seg->pages[p], 0);
-        }
-        seg->active = false;
-    }
-
     spin_unlock_irqrestore(&shm_lock, flags);
+
+    if (has_seg_info) {
+        for (size_t pg = 0; pg < num_pages; pg++)
+            mmu_unmap(curproc->p_vm_map, addr + (pg * PAGE_SIZE));
+    }
+
+    if (do_free) {
+        for (size_t pg = 0; pg < num_pages; pg++)
+            page_free(pages[pg], 0);
+    }
+
+    kfree(pages);
     return 0;
 }
 
@@ -325,28 +345,32 @@ int64_t sys_shmctl(int shmid, int cmd, struct shmid_ds *buf) {
     }
 
     switch (cmd) {
-        case IPC_RMID:
+        case IPC_RMID: {
             seg->marked_for_deletion = true;
-            if (seg->ds.shm_nattch == 0) {
-                for (size_t p = 0; p < seg->num_pages; p++) {
+            size_t num_pages = seg->num_pages;
+            bool last = (seg->ds.shm_nattch == 0);
+            if (last) {
+                for (size_t p = 0; p < num_pages; p++)
                     page_free(seg->pages[p], 0);
-                }
                 seg->active = false;
             }
             spin_unlock_irqrestore(&shm_lock, flags);
             return 0;
+        }
 
         case IPC_STAT:
             if (!buf || !is_user_address_range(buf, sizeof(struct shmid_ds))) {
                 spin_unlock_irqrestore(&shm_lock, flags);
                 return -EFAULT;
             }
-            if (copy_to_user(buf, &seg->ds, sizeof(struct shmid_ds)) < 0) {
+            {
+                struct shmid_ds tmp_ds;
+                memcpy(&tmp_ds, &seg->ds, sizeof(tmp_ds));
                 spin_unlock_irqrestore(&shm_lock, flags);
-                return -EFAULT;
+                if (copy_to_user(buf, &tmp_ds, sizeof(struct shmid_ds)) < 0)
+                    return -EFAULT;
+                return 0;
             }
-            spin_unlock_irqrestore(&shm_lock, flags);
-            return 0;
 
         default:
             spin_unlock_irqrestore(&shm_lock, flags);
@@ -355,43 +379,67 @@ int64_t sys_shmctl(int shmid, int cmd, struct shmid_ds *buf) {
 }
 
 void shm_cleanup_proc(struct proc *p) {
-    uint64_t flags = spin_lock_irqsave(&shm_lock);
+    page_t **pages = kmalloc(MAX_SHM_PAGES_PER_SEGMENT * sizeof(page_t *));
+    if (!pages) return;
 
     for (int i = 0; i < MAX_SHM_ATTACHMENTS; i++) {
-        if (shm_attachments[i].active && shm_attachments[i].pid == p->p_pid) {
-            uintptr_t addr = shm_attachments[i].vaddr;
-            int shmid = shm_attachments[i].shmid;
+        int shmid;
+        uintptr_t addr;
+        size_t num_pages = 0;
+        bool do_free = false;
+        bool has_seg_info = false;
 
-            struct shm_segment_internal *seg = NULL;
-            for (int s = 0; s < MAX_SHM_SEGMENTS; s++) {
-                if (shm_segments[s].active && shm_segments[s].id == shmid) {
-                    seg = &shm_segments[s];
-                    break;
-                }
+        uint64_t flags = spin_lock_irqsave(&shm_lock);
+
+        if (!shm_attachments[i].active || shm_attachments[i].pid != p->p_pid) {
+            spin_unlock_irqrestore(&shm_lock, flags);
+            continue;
+        }
+
+        addr = shm_attachments[i].vaddr;
+        shmid = shm_attachments[i].shmid;
+
+        struct shm_segment_internal *seg = NULL;
+        for (int s = 0; s < MAX_SHM_SEGMENTS; s++) {
+            if (shm_segments[s].active && shm_segments[s].id == shmid) {
+                seg = &shm_segments[s];
+                break;
+            }
+        }
+
+        if (seg) {
+            num_pages = seg->num_pages;
+            for (size_t pg = 0; pg < num_pages; pg++) {
+                pages[pg] = seg->pages[pg];
             }
 
-            if (seg) {
-                for (size_t pg = 0; pg < seg->num_pages; pg++) {
-                    mmu_unmap(p->p_vm_map, addr + (pg * PAGE_SIZE));
-                }
+            if (seg->ds.shm_nattch > 0)
+                seg->ds.shm_nattch--;
 
-                if (seg->ds.shm_nattch > 0) {
-                    seg->ds.shm_nattch--;
-                }
-                
-                if (seg->marked_for_deletion && seg->ds.shm_nattch == 0) {
-                    for (size_t pg = 0; pg < seg->num_pages; pg++) {
-                        page_free(seg->pages[pg], 0);
-                    }
-                    seg->active = false;
-                }
+            do_free = seg->marked_for_deletion && seg->ds.shm_nattch == 0;
+            if (do_free)
+                seg->active = false;
+            
+            has_seg_info = true; 
+        }
+
+        shm_attachments[i].active = false;
+        spin_unlock_irqrestore(&shm_lock, flags);
+
+        if (has_seg_info) {
+            for (size_t pg = 0; pg < num_pages; pg++) {
+                mmu_unmap(p->p_vm_map, addr + (pg * PAGE_SIZE));
             }
+        }
 
-            shm_attachments[i].active = false;
+        if (do_free) {
+            for (size_t pg = 0; pg < num_pages; pg++) {
+                page_free(pages[pg], 0);
+            }
         }
     }
 
-    spin_unlock_irqrestore(&shm_lock, flags);
+    kfree(pages);
 }
 
 void shm_fork_copy(struct proc *parent, struct proc *child) {
@@ -399,7 +447,6 @@ void shm_fork_copy(struct proc *parent, struct proc *child) {
 
     for (int i = 0; i < MAX_SHM_ATTACHMENTS; i++) {
         if (shm_attachments[i].active && shm_attachments[i].pid == parent->p_pid) {
-            uintptr_t addr = shm_attachments[i].vaddr;
             int shmid = shm_attachments[i].shmid;
             size_t size = shm_attachments[i].size;
 
@@ -413,7 +460,7 @@ void shm_fork_copy(struct proc *parent, struct proc *child) {
 
             if (child_slot != -1) {
                 shm_attachments[child_slot].pid = child->p_pid;
-                shm_attachments[child_slot].vaddr = addr;
+                shm_attachments[child_slot].vaddr = shm_attachments[i].vaddr;
                 shm_attachments[child_slot].shmid = shmid;
                 shm_attachments[child_slot].size = size;
                 shm_attachments[child_slot].active = true;
@@ -425,10 +472,8 @@ void shm_fork_copy(struct proc *parent, struct proc *child) {
                         break;
                     }
                 }
-
-                if (seg) {
+                if (seg)
                     seg->ds.shm_nattch++;
-                }
             }
         }
     }

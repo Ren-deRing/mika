@@ -6,6 +6,7 @@
 #include <kernel/proc.h>
 #include <kernel/sched.h>
 #include <kernel/kmem.h>
+#include <kernel/kstack.h>
 #include <kernel/exec.h>
 #include <kernel/list.h>
 #include <kernel/syscall.h>
@@ -42,7 +43,7 @@ int64_t sys_clone(uint64_t flags, void *child_stack, void *ptid, void *ctid, uin
         if (!child_t) return -ENOMEM;
         memset(child_t, 0, sizeof(struct thread));
 
-        void *child_stack_k = kmalloc_aligned(KSTACK_SIZE, KSTACK_SIZE);
+        void *child_stack_k = kstack_alloc();
         if (!child_stack_k) {
             kfree_aligned(child_t);
             return -ENOMEM;
@@ -51,7 +52,7 @@ int64_t sys_clone(uint64_t flags, void *child_stack, void *ptid, void *ctid, uin
 
         int err = arch_thread_fork(child_t, curthread);
         if (err < 0) {
-            kfree_aligned(child_stack_k);
+            kstack_free(child_stack_k);
             kfree_aligned(child_t);
             return err;
         }
@@ -74,15 +75,15 @@ int64_t sys_clone(uint64_t flags, void *child_stack, void *ptid, void *ctid, uin
 
         if (flags & CLONE_PARENT_SETTID) {
             if (parent_tid) {
-                if (!is_user_address_range(parent_tid, sizeof(int))) return -EFAULT;
-                if (copy_to_user(parent_tid, &child_t->t_tid, sizeof(int)) < 0) return -EFAULT;
+                if (!is_user_address_range(parent_tid, sizeof(int))) goto err_free_child;
+                if (copy_to_user(parent_tid, &child_t->t_tid, sizeof(int)) < 0) goto err_free_child;
             }
         }
 
         if (flags & CLONE_CHILD_SETTID) {
             if (child_tid) {
-                if (!is_user_address_range(child_tid, sizeof(int))) return -EFAULT;
-                if (copy_to_user(child_tid, &child_t->t_tid, sizeof(int)) < 0) return -EFAULT;
+                if (!is_user_address_range(child_tid, sizeof(int))) goto err_free_child;
+                if (copy_to_user(child_tid, &child_t->t_tid, sizeof(int)) < 0) goto err_free_child;
             }
         }
 
@@ -95,8 +96,16 @@ int64_t sys_clone(uint64_t flags, void *child_stack, void *ptid, void *ctid, uin
         curproc->p_threads = child_t;
         spin_unlock_irqrestore(&curproc->p_lock, lock_flags);
 
+        // dprintf("[sys_clone] created thread TID=%d, target_cpu=%d, t_state=%d\n", child_t->t_tid, child_t->t_cpu, child_t->t_state);
         sched_enqueue(child_t);
+        // dprintf("[sys_clone] enqueued thread TID=%d, returning to parent\n", child_t->t_tid);
         return child_t->t_tid;
+
+    err_free_child:
+        arch_thread_destroy(child_t);
+        kstack_free(child_stack_k);
+        kfree_aligned(child_t);
+        return -EFAULT;
     } else {
         struct proc *parent_p = curproc;
         struct thread *parent_t = curthread;
@@ -145,19 +154,19 @@ int64_t sys_clone(uint64_t flags, void *child_stack, void *ptid, void *ctid, uin
             }
         }
         // VMA 트리 Clone
-        uint64_t vma_lock_flags = spin_lock_irqsave(&parent_p->p_vma_lock);
+        down_write(&parent_p->p_vma_lock);
         struct vm_area *vma;
         vma_for_each(vma, &parent_p->p_vma_list) {
             struct vm_area *clone = vma_alloc(vma->start, vma->end,
                                               vma->flags, vma->vn,
                                               vma->file_offset);
             if (!clone) {
-                spin_unlock_irqrestore(&parent_p->p_vma_lock, vma_lock_flags);
+                up_write(&parent_p->p_vma_lock);
                 goto err_vm_map;
             }
             vma_insert(&child_p->p_vma_root, &child_p->p_vma_list, clone);
         }
-        spin_unlock_irqrestore(&parent_p->p_vma_lock, vma_lock_flags);
+        up_write(&parent_p->p_vma_lock);
 
         child_p->p_entry = parent_p->p_entry;
         child_p->p_stack_top = parent_p->p_stack_top;
@@ -170,7 +179,7 @@ int64_t sys_clone(uint64_t flags, void *child_stack, void *ptid, void *ctid, uin
         }
         memset(child_t, 0, sizeof(struct thread));
 
-        void *child_stack_k = kmalloc_aligned(KSTACK_SIZE, KSTACK_SIZE);
+        void *child_stack_k = kstack_alloc();
         if (!child_stack_k) {
             goto err_thread;
         }
@@ -224,7 +233,7 @@ int64_t sys_clone(uint64_t flags, void *child_stack, void *ptid, void *ctid, uin
         return child_p->p_pid;
 
     err_stack:
-        kfree_aligned(child_stack_k);
+        kstack_free(child_stack_k);
     err_thread:
         kfree_aligned(child_t);
     err_vm_map:
@@ -289,19 +298,19 @@ int64_t sys_fork(void) {
         }
 
         // VMA 트리 Clone
-    uint64_t vma_lock_flags = spin_lock_irqsave(&parent_p->p_vma_lock);
+    down_write(&parent_p->p_vma_lock);
     struct vm_area *vma;
     vma_for_each(vma, &parent_p->p_vma_list) {
         struct vm_area *clone = vma_alloc(vma->start, vma->end,
                                           vma->flags, vma->vn,
                                           vma->file_offset);
         if (!clone) {
-            spin_unlock_irqrestore(&parent_p->p_vma_lock, vma_lock_flags);
+            up_write(&parent_p->p_vma_lock);
             goto err_proc;
         }
         vma_insert(&child_p->p_vma_root, &child_p->p_vma_list, clone);
     }
-    spin_unlock_irqrestore(&parent_p->p_vma_lock, vma_lock_flags);
+    up_write(&parent_p->p_vma_lock);
     
     extern void shm_fork_copy(struct proc *parent, struct proc *child);
     shm_fork_copy(parent_p, child_p);
@@ -317,7 +326,7 @@ int64_t sys_fork(void) {
     }
     memset(child_t, 0, sizeof(struct thread));
 
-    void *child_stack = kmalloc_aligned(KSTACK_SIZE, KSTACK_SIZE);
+    void *child_stack = kstack_alloc();
     if (!child_stack) {
         goto err_thread;
     }
@@ -345,7 +354,7 @@ int64_t sys_fork(void) {
     return child_p->p_pid;
 
 err_stack:
-    kfree_aligned(child_stack);
+    kstack_free(child_stack);
 err_thread:
     kfree_aligned(child_t);
 err_vm_map:
@@ -415,6 +424,7 @@ int64_t sys_exit(int status) {
 int64_t sys_set_tid_address(int *tidptr) {
     if (tidptr) {
         if (!is_user_address_range(tidptr, sizeof(int))) return -EFAULT;
+        curthread->t_clear_child_tid = tidptr;
     }
     
     if (curthread->t_tid == 0) curthread->t_tid = 1; 
@@ -430,7 +440,7 @@ int64_t sys_execve(const char *user_path, char *const argv[], char *const envp[]
 
     char clean_path[256];
     sanitize_path(kpath, clean_path, sizeof(clean_path));
-    dprintf("[sys_execve] Attempting exec: '%s'\n", clean_path);
+    // dprintf("[sys_execve] Attempting exec: '%s'\n", clean_path);
 
     struct vnode *vn = NULL;
     int err = vfs_lookup(clean_path, curproc->p_cwd, &vn);
@@ -479,8 +489,8 @@ int64_t sys_execve(const char *user_path, char *const argv[], char *const envp[]
     uint64_t phnum = 0;
     uintptr_t interpreter_base = 0;
     
-    dprintf("[sys_execve] Reading ELF header, e_type: %d, e_entry: %p\n", ehdr->e_type, ehdr->e_entry);
-    page_table_t *new_map = load_elf(elf_data, &entry_point, &brk, &phdr_vaddr, &phnum, &interpreter_base);
+    // dprintf("[sys_execve] Reading ELF header, e_type: %d, e_entry: %p\n", ehdr->e_type, ehdr->e_entry);
+    page_table_t *new_map = load_elf(elf_data, file_size, &entry_point, &brk, &phdr_vaddr, &phnum, &interpreter_base);
     
     kfree(elf_data);
     
@@ -489,12 +499,12 @@ int64_t sys_execve(const char *user_path, char *const argv[], char *const envp[]
         return -ENOEXEC; 
     }
 
-    dprintf("[sys_execve] load_elf SUCCESS! entry: %p, interpreter_base: %p\n", entry_point, interpreter_base);
+    // dprintf("[sys_execve] load_elf SUCCESS! entry: %p, interpreter_base: %p\n", entry_point, interpreter_base);
 
     {
-        uint64_t vma_lk = spin_lock_irqsave(&curproc->p_vma_lock);
+        down_write(&curproc->p_vma_lock);
         vma_remove_range(&curproc->p_vma_root, &curproc->p_vma_list, 0, ~0ULL);
-        spin_unlock_irqrestore(&curproc->p_vma_lock, vma_lk);
+        up_write(&curproc->p_vma_lock);
     }
 
     uintptr_t stack_top = USER_STACK_TOP;
@@ -503,18 +513,18 @@ int64_t sys_execve(const char *user_path, char *const argv[], char *const envp[]
     struct vm_area *stack_vma = vma_alloc(stack_bottom, stack_top,
         MMU_FLAGS_USER | MMU_FLAGS_READ | MMU_FLAGS_WRITE, NULL, 0);
     if (stack_vma) {
-        uint64_t vma_lk = spin_lock_irqsave(&curproc->p_vma_lock);
+        down_write(&curproc->p_vma_lock);
         vma_insert(&curproc->p_vma_root, &curproc->p_vma_list, stack_vma);
-        spin_unlock_irqrestore(&curproc->p_vma_lock, vma_lk);
+        up_write(&curproc->p_vma_lock);
     }
 
     uintptr_t final_user_rsp = setup_user_stack(new_map, USER_STACK_TOP, argv, envp, phdr_vaddr, phnum, interpreter_base, original_entry);
     if (final_user_rsp == 0 || (final_user_rsp % 16) != 0) {
         dprintf("setup_user_stack FAILED. Misaligned RSP: %p\n", final_user_rsp);
         if (stack_vma) {
-            uint64_t vma_lk = spin_lock_irqsave(&curproc->p_vma_lock);
+            down_write(&curproc->p_vma_lock);
             vma_remove_range(&curproc->p_vma_root, &curproc->p_vma_list, stack_bottom, stack_top);
-            spin_unlock_irqrestore(&curproc->p_vma_lock, vma_lk);
+            up_write(&curproc->p_vma_lock);
         }
         mmu_destroy_map(new_map);
         return -EFAULT;

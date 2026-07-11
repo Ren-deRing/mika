@@ -21,7 +21,7 @@ bool is_user_address_range(const void *addr, size_t size) {
 }
 
 int copy_to_user(void *user_dest, const void *src, size_t n) {
-    if (!curthread || !curthread->t_proc || !curthread->t_proc->p_vm_map) return -1;
+    if (!curthread || !curthread->t_proc || !curthread->t_proc->p_vm_map) return -EFAULT;
     page_table_t *map = curthread->t_proc->p_vm_map;
     uintptr_t dest = (uintptr_t)user_dest;
     uint8_t *s = (uint8_t *)src;
@@ -29,7 +29,7 @@ int copy_to_user(void *user_dest, const void *src, size_t n) {
 
     while (copied < n) {
         uintptr_t paddr = mmu_translate(map, dest + copied);
-        if (!paddr) return -1;
+        if (!paddr) return -EFAULT;
 
         size_t page_offset = (dest + copied) & 0xFFF;
         size_t to_copy = 4096 - page_offset;
@@ -42,7 +42,7 @@ int copy_to_user(void *user_dest, const void *src, size_t n) {
 }
 
 int copy_from_user(void *dest, const void *user_src, size_t n) {
-    if (!curthread || !curthread->t_proc || !curthread->t_proc->p_vm_map) return -1;
+    if (!curthread || !curthread->t_proc || !curthread->t_proc->p_vm_map) return -EFAULT;
     page_table_t *map = curthread->t_proc->p_vm_map;
     uintptr_t src = (uintptr_t)user_src;
     uint8_t *d = (uint8_t *)dest;
@@ -50,7 +50,7 @@ int copy_from_user(void *dest, const void *user_src, size_t n) {
 
     while (copied < n) {
         uintptr_t paddr = mmu_translate(map, src + copied);
-        if (!paddr) return -1;
+        if (!paddr) return -EFAULT;
 
         size_t page_offset = (src + copied) & 0xFFF;
         size_t to_copy = 4096 - page_offset;
@@ -63,8 +63,8 @@ int copy_from_user(void *dest, const void *user_src, size_t n) {
 }
 
 int copy_str_from_user(char *dest, const char *user_src, size_t max_len) {
-    if (!user_src) return -1;
-    if (!curthread || !curthread->t_proc || !curthread->t_proc->p_vm_map) return -1;
+    if (!user_src) return -EFAULT;
+    if (!curthread || !curthread->t_proc || !curthread->t_proc->p_vm_map) return -EFAULT;
     page_table_t *map = curthread->t_proc->p_vm_map;
     uintptr_t src = (uintptr_t)user_src;
     size_t copied = 0;

@@ -191,18 +191,18 @@ int64_t sys_epoll_ctl(int epfd, int op, int fd, void *user_event) {
         if (copy_from_user(&ev, user_event, sizeof(struct epoll_event)) < 0) { fdput(epf); fdput(target_f); return -EFAULT; }
     }
 
-    spin_lock(&ei->lock);
+    uint64_t irq_flags = spin_lock_irqsave(&ei->lock);
 
     if (op == EPOLL_CTL_ADD) {
         for (int i = 0; i < ei->count; i++) {
             if (ei->items[i].fd == fd) {
-                spin_unlock(&ei->lock);
+                spin_unlock_irqrestore(&ei->lock, irq_flags);
                 fdput(epf); fdput(target_f);
                 return -EEXIST;
             }
         }
         if (ei->count >= MAX_EPOLL_ITEMS) {
-            spin_unlock(&ei->lock);
+            spin_unlock_irqrestore(&ei->lock, irq_flags);
             fdput(epf); fdput(target_f);
             return -ENOMEM;
         }
@@ -218,7 +218,7 @@ int64_t sys_epoll_ctl(int epfd, int op, int fd, void *user_event) {
             }
         }
         if (found < 0) {
-            spin_unlock(&ei->lock);
+            spin_unlock_irqrestore(&ei->lock, irq_flags);
             fdput(epf); fdput(target_f);
             return -ENOENT;
         }
@@ -232,7 +232,7 @@ int64_t sys_epoll_ctl(int epfd, int op, int fd, void *user_event) {
             }
         }
         if (found < 0) {
-            spin_unlock(&ei->lock);
+            spin_unlock_irqrestore(&ei->lock, irq_flags);
             fdput(epf); fdput(target_f);
             return -ENOENT;
         }
@@ -241,12 +241,12 @@ int64_t sys_epoll_ctl(int epfd, int op, int fd, void *user_event) {
         }
         ei->count--;
     } else {
-        spin_unlock(&ei->lock);
+        spin_unlock_irqrestore(&ei->lock, irq_flags);
         fdput(epf); fdput(target_f);
         return -EINVAL;
     }
 
-    spin_unlock(&ei->lock);
+    spin_unlock_irqrestore(&ei->lock, irq_flags);
     fdput(epf); fdput(target_f);
     return 0;
 }
@@ -268,7 +268,8 @@ int64_t sys_epoll_wait(int epfd, void *user_events, int maxevents, int timeout) 
     uint64_t deadline = (timeout > 0) ? get_uptime_ns() + (uint64_t)timeout * 1000000 : 0;
     while (1) {
         ready_count = 0;
-        spin_lock(&ei->lock);
+
+        uint64_t irq_flags = spin_lock_irqsave(&ei->lock);
 
         for (int i = 0; i < ei->count && ready_count < maxevents; i++) {
             int fd = ei->items[i].fd;
@@ -278,14 +279,13 @@ int64_t sys_epoll_wait(int epfd, void *user_events, int maxevents, int timeout) 
             if (revents & req_events) {
                 events[ready_count].events = revents & req_events;
                 events[ready_count].data = ei->items[i].event.data;
-                ready_count++;
-                if (ei->items[i].event.events & EPOLLONESHOT) {
+                if (ei->items[i].event.events & EPOLLONESHOT)
                     ei->items[i].event.events = 0;
-                }
+                ready_count++;
             }
         }
 
-        spin_unlock(&ei->lock);
+        spin_unlock_irqrestore(&ei->lock, irq_flags);
 
         if (ready_count > 0 || timeout == 0) {
             break;

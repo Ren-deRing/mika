@@ -966,16 +966,9 @@ void handle_page_fault(struct trapframe *regs, void *data) {
         page_table_t *map = mmu_get_active_map();
         if (map && curproc) {
             uint32_t vma_flags = 0;
-            uint64_t vma_lk = spin_lock_irqsave(&curproc->p_vma_lock);
-            struct vm_area *vma = vma_find(curproc->p_vma_root, fault_addr);
-            if (vma) {
-                vma_flags = vma->flags;
-            }
-            spin_unlock_irqrestore(&curproc->p_vma_lock, vma_lk);
+            uintptr_t phys = vma_resolve_fault(curproc, fault_addr, &vma_flags);
 
-            if (vma) {
-                uintptr_t phys = vma_resolve_fault(curproc, fault_addr);
-
+            if (vma_flags != 0) {
                 if (phys == 0) {
                     page_t *pg = page_alloc(0);
                     if (pg) {

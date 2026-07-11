@@ -129,6 +129,8 @@ int64_t sys_nanosleep(const struct timespec *user_req, struct timespec *user_rem
     return 0;
 }
 
+static spinlock_t getrandom_lock = SPINLOCK_INITIALIZER;
+
 int64_t sys_getrandom(void *buf, size_t buflen, unsigned int flags) {
     (void)flags;
     if (buflen > 0 && !is_user_address_range(buf, buflen)) {
@@ -142,6 +144,7 @@ int64_t sys_getrandom(void *buf, size_t buflen, unsigned int flags) {
         if (to_copy > sizeof(chunk)) {
             to_copy = sizeof(chunk);
         }
+        uint64_t flags2 = spin_lock_irqsave(&getrandom_lock);
         for (size_t i = 0; i < to_copy; i++) {
             static uint64_t rand_val = 0;
             static int bytes_left = 0;
@@ -160,6 +163,7 @@ int64_t sys_getrandom(void *buf, size_t buflen, unsigned int flags) {
             rand_val >>= 8;
             bytes_left--;
         }
+        spin_unlock_irqrestore(&getrandom_lock, flags2);
         if (copy_to_user((char *)buf + total, chunk, to_copy) < 0) {
             return -EFAULT;
         }

@@ -9,6 +9,10 @@
 #include <kernel/syscall.h>
 #include <string.h>
 
+#define SIG_BLOCK   0
+#define SIG_UNBLOCK 1
+#define SIG_SETMASK 2
+
 void handle_signal_dispatch(struct trapframe *tf, int sig, struct sigaction *act) {
     uintptr_t user_rsp = tf->rsp;
 
@@ -173,28 +177,57 @@ int64_t sys_kill(pid_t pid, int sig) {
         return -ESRCH;
     }
 
-    struct thread *t = p->p_threads;
-    if (!t) {
-        proc_put(p);
-        return -ESRCH;
-    }
-
     uint64_t flags = spin_lock_irqsave(&p->p_lock);
-    t->t_sig_pending |= (1ULL << (sig - 1));
+    struct thread *t = p->p_threads;
+    while (t) {
+        t->t_sig_pending |= (1ULL << (sig - 1));
+        thread_signal_wakeup(t);
+        t = t->t_proc_next;
+    }
     spin_unlock_irqrestore(&p->p_lock, flags);
-
-    thread_signal_wakeup(t);
 
     proc_put(p);
     return 0;
 }
 
 int64_t sys_rt_sigprocmask(int how, const void *set, void *oset, size_t sigsetsize) {
-    (void)how; (void)set; (void)sigsetsize;
-    if (oset && is_user_address_range(oset, sigsetsize)) {
-        uint64_t zero = 0;
-        copy_to_user(oset, &zero, sizeof(zero));
+    if (sigsetsize != sizeof(sigset_t))
+        return -EINVAL;
+
+    sigset_t new_mask;
+
+    if (set) {
+        if (!is_user_address_range(set, sigsetsize))
+            return -EFAULT;
+        if (copy_from_user(&new_mask, set, sigsetsize) < 0)
+            return -EFAULT;
     }
+
+    sigset_t old = curthread->t_sig_mask;
+
+    if (oset) {
+        if (!is_user_address_range(oset, sigsetsize))
+            return -EFAULT;
+        if (copy_to_user(oset, &old, sigsetsize) < 0)
+            return -EFAULT;
+    }
+
+    if (set) {
+        switch (how) {
+        case SIG_BLOCK:
+            curthread->t_sig_mask |= new_mask;
+            break;
+        case SIG_UNBLOCK:
+            curthread->t_sig_mask &= ~new_mask;
+            break;
+        case SIG_SETMASK:
+            curthread->t_sig_mask = new_mask;
+            break;
+        default:
+            return -EINVAL;
+        }
+    }
+
     return 0;
 }
 

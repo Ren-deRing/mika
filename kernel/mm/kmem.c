@@ -138,23 +138,24 @@ static void kmem_magazine_swap_full(int idx) {
         c->magazines[idx] = empty;
     } else {
         spin_unlock_irqrestore(&d->lock, flags);
-        c->magazines[idx] = kmem_get_empty_mag(idx);
+        kmem_magazine_t *empty = kmem_get_empty_mag(idx);
+        c->magazines[idx] = empty;
     }
 }
 
 static void kmem_setup_slab_page(page_t* p, uint32_t obj_size, uint8_t order) {
     uint32_t num_pages = (1U << order);
-    uint32_t total_size = (PAGE_SIZE << order);
-    uint32_t max_objs = total_size / obj_size;
 
     p->obj_size = obj_size;
     p->order = order;
     p->is_free = false;
 
+    uint32_t per_page_objs = PAGE_SIZE / obj_size;
+
     page_t* curr_pg = p;
     for (uint32_t i = 0; i < num_pages; i++) {
         curr_pg->obj_size = obj_size;
-        curr_pg->free_count = max_objs;
+        curr_pg->free_count = per_page_objs;
         curr_pg++;
     }
 }
@@ -211,10 +212,12 @@ static void kmem_magazine_swap_empty(int idx) {
         spin_unlock_irqrestore(&d->lock, flags);
 
         kmem_magazine_t* new_mag = kmem_get_empty_mag(idx);
-        for (int i = 0; i < KMEM_MAG_CAPACITY; i++) {
-            void* obj = kmem_depot_refill(idx);
-            if (!obj) break;
-            new_mag->slots[new_mag->top++] = obj;
+        if (new_mag) {
+            for (int i = 0; i < KMEM_MAG_CAPACITY; i++) {
+                void* obj = kmem_depot_refill(idx);
+                if (!obj) break;
+                new_mag->slots[new_mag->top++] = obj;
+            }
         }
         c->magazines[idx] = new_mag;
     }
@@ -239,6 +242,7 @@ void* kmalloc(size_t size) {
 
     if (!c->magazines[idx]) {
         c->magazines[idx] = kmem_get_empty_mag(idx);
+        if (!c->magazines[idx]) return NULL;
     }
 
     kmem_magazine_t* mag = c->magazines[idx];
@@ -253,7 +257,7 @@ void* kmalloc(size_t size) {
 
     mag = c->magazines[idx];
 
-    if (mag->top > 0) {
+    if (mag && mag->top > 0) {
         void* ptr = mag->slots[--mag->top];
         kasan_kmalloc(ptr, size, kmem_class_sizes[idx]);
         return ptr;
@@ -283,6 +287,7 @@ void kfree(void* ptr) {
 
     if (!c->magazines[idx]) {
         c->magazines[idx] = kmem_get_empty_mag(idx);
+        if (!c->magazines[idx]) return;
     }
 
     kmem_magazine_t* mag = c->magazines[idx];

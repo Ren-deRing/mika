@@ -67,6 +67,8 @@ struct posix_timer {
     uint64_t pt_value_ns;
 };
 
+#define T_KSTACK_KMALLOC 1
+
 // TCB
 struct thread {
     tid_t            t_tid;
@@ -119,7 +121,7 @@ struct proc {
     proc_state_t    p_state;
     spinlock_t      p_lock;
     spinlock_t      p_vm_lock;
-    spinlock_t      p_vma_lock;
+    rw_semaphore_t  p_vma_lock;
     uint64_t        p_active_cpus;
 
     char            p_name[16];

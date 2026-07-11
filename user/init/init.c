@@ -932,6 +932,7 @@ static void test_mt_concurrent_epoll(void) {
     TEST("concurrent epoll add/mod/del (4 threads, 8 pipes, 100 iters)");
 
     int epfd = epoll_create1(0);
+    printf("  [ep] epfd=%d\n", epfd); fflush(stdout);
     ASSERT(epfd >= 0, "epoll_create1");
 
     ep_barrier = 0;
@@ -944,8 +945,11 @@ static void test_mt_concurrent_epoll(void) {
         for (int j = 0; j < EP_MT_PIPES; j++) {
             ASSERT(pipe(args[i].pipes[j]) == 0, "ep pipe");
         }
-        { int _perr = pthread_create(&threads[i], NULL, ep_worker, &args[i]); printf("  [ep %d] err=%d errno=%d\n", i, _perr, errno); ASSERT(_perr == 0, "ep pthread_create"); }
+        printf("  [ep] creating thread %d...\n", i); fflush(stdout);
+        ASSERT(pthread_create(&threads[i], NULL, ep_worker, &args[i]) == 0, "ep pthread_create");
+        printf("  [ep] thread %d created\n", i); fflush(stdout);
     }
+
     for (int i = 0; i < EP_MT_NUM; i++) {
         pthread_join(threads[i], NULL);
         for (int j = 0; j < EP_MT_PIPES; j++) {

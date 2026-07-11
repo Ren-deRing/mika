@@ -65,7 +65,6 @@ struct vnode* vnode_alloc(uint32_t type, struct vnode_ops *ops) {
 
     rwlock_init(&vn->rwlock);
     mutex_init(&vn->io_mutex);
-    spin_lock_init(&vn->lock);
 
     flags = spin_lock_irqsave(&vnode_list_lock);
     list_add(&vn->v_all, &vnode_all_list);
@@ -156,15 +155,3 @@ void vput(struct vnode *vn) {
     }
 }
 
-int vget(struct vnode *vp) {
-    uint64_t flags = spin_lock_irqsave(&vnode_list_lock);
-
-    if (vp->ref_count == 0) {
-        list_del(&vp->v_freelist);
-    }
-
-    __atomic_fetch_add(&vp->ref_count, 1, __ATOMIC_SEQ_CST);
-
-    spin_unlock_irqrestore(&vnode_list_lock, flags);
-    return 0;
-}
