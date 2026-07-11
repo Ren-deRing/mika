@@ -15,10 +15,14 @@ struct thread* arch_init_first_thread(void) {
     struct proc *p0 = proc_create(0);
 
     struct thread *t0 = kmalloc_aligned(sizeof(struct thread), 64);
+    if (!t0) return NULL;
     memset(t0, 0, sizeof(struct thread));
 
     void *new_stack = kstack_alloc();
-    if (!new_stack) return NULL;
+    if (!new_stack) {
+        kfree_aligned(t0);
+        return NULL;
+    }
     t0->t_kstack = new_stack;
     t0->t_tid = 0;
     t0->t_proc = p0;
@@ -30,6 +34,7 @@ struct thread* arch_init_first_thread(void) {
     t0->t_cpu = 0;
     
     t0->t_arch_data = kmalloc_aligned(g_xsave_size, 64);
+    if (!t0->t_arch_data) return NULL;
     memset(t0->t_arch_data, 0, g_xsave_size);
 
     curcpu->self = &cpus[0];
@@ -45,10 +50,14 @@ struct thread* arch_init_ap_thread(uint32_t cpu_id) {
     if (!p0) return NULL;
 
     struct thread *t = kmalloc_aligned(sizeof(struct thread), 64);
+    if (!t) return NULL;
     memset(t, 0, sizeof(struct thread));
 
     void *new_stack = kstack_alloc();
-    if (!new_stack) return NULL;
+    if (!new_stack) {
+        kfree_aligned(t);
+        return NULL;
+    }
     t->t_kstack = new_stack;
     t->t_tid = 0;
     t->t_proc = p0;
@@ -65,6 +74,7 @@ struct thread* arch_init_ap_thread(uint32_t cpu_id) {
     t->t_cpu = cpu_id;
 
     t->t_arch_data = kmalloc_aligned(g_xsave_size, 64);
+    if (!t->t_arch_data) return NULL;
     memset(t->t_arch_data, 0, g_xsave_size);
 
     struct cpu *c = &cpus[cpu_id];

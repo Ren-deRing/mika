@@ -72,6 +72,7 @@ int proc_exec(void *elf_data, size_t elf_size, char *const argv[], char *const e
 
     struct thread *new_t = thread_create(p, __sync_fetch_and_add(&next_tid, 1), arch_user_trampoline, (void *)p);
     if (!new_t) {
+        proc_free(p);
         return -ENOMEM;
     }
 

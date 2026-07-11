@@ -777,15 +777,63 @@ page_table_t* mmu_get_kernel_map(void) {
     return g_kernel_pagemap;
 }
 
+static int mmu_split_huge_page_locked(page_table_t* map, uint64_t vaddr) {
+    uint64_t indices[3] = { GET_PML4_IDX(vaddr), GET_PDPT_IDX(vaddr), GET_PD_IDX(vaddr) };
+    page_table_t* current_table = map;
+
+    for (int i = 0; i < 3; i++) {
+        pt_entry_t* entry = &current_table->entries[indices[i]];
+        if (!(*entry & X86_PTE_PRESENT)) return -1;
+        if (i == 2 && (*entry & X86_PTE_HUGE)) {
+            uint64_t huge_phys = *entry & PAGE_ADDR_MASK;
+            uint64_t huge_flags = *entry & ~(PAGE_ADDR_MASK | X86_PTE_HUGE);
+
+            page_t* pt_page = pmm_alloc_pages(0);
+            if (!pt_page) return -1;
+            uint64_t pt_phys = page_to_phys(pt_page);
+            page_table_t* pt = phys_to_virt(pt_phys);
+            memset(pt, 0, PAGE_SIZE);
+
+            for (int j = 0; j < 512; j++) {
+                uint64_t page_phys = huge_phys + j * PAGE_SIZE;
+                pt->entries[j] = page_phys | huge_flags;
+                page_t* pg = phys_to_page(page_phys);
+                if (pg) pg->ref_count++;
+            }
+
+            page_t* old_page = phys_to_page(huge_phys);
+            if (old_page && old_page->ref_count > 0) old_page->ref_count--;
+
+            pt_page->ref_count = 0;
+            page_t* pd_page = phys_to_page(virt_to_phys(current_table));
+            if (pd_page) pd_page->ref_count++;
+
+            *entry = pt_phys | X86_PTE_PRESENT | X86_PTE_WRITABLE | X86_PTE_USER;
+            return 0;
+        }
+        current_table = (page_table_t*)ENTRY_TO_VIRT(*entry);
+    }
+    return -1;
+}
+
 void mmu_protect_page(page_table_t* map, uintptr_t vaddr, int prot) {
     spinlock_t* lock = mmu_get_lock(map);
     uint64_t lock_flags = spin_lock_irqsave(lock);
     pt_entry_t* pte = vmm_get_pte(map, (uint64_t)vaddr, false);
     
+    if (!pte) {
+        mmu_split_huge_page_locked(map, (uint64_t)vaddr);
+        pte = vmm_get_pte(map, (uint64_t)vaddr, false);
+    }
+
     if (pte && (*pte & X86_PTE_PRESENT)) {
-        uint64_t new_flags = X86_PTE_PRESENT | X86_PTE_USER;
+        uint64_t new_flags = X86_PTE_PRESENT;
         
-        if (prot & 0x2) { // PROT_WRITE
+        if (*pte & X86_PTE_USER) {
+            new_flags |= X86_PTE_USER;
+        }
+
+        if (prot & 0x2) {
             new_flags |= X86_PTE_WRITABLE;
         }
 
@@ -882,6 +930,8 @@ page_table_t *mmu_clone_map(page_table_t *parent_map) {
         }
     }
     spin_unlock_irqrestore(lock, lock_flags);
+
+    mmu_tlb_shootdown_ex(parent_map, 0);
 
     return child_map;
 }

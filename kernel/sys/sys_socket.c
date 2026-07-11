@@ -267,6 +267,7 @@ static ssize_t sock_write(struct vnode *vp, const void *buf, size_t n, off_t off
             thread_yield();
             spin_lock(&peer->lock);
             if (peer->state != SS_CONNECTED) {
+                spin_unlock(&peer->lock);
                 return -EPIPE;
             }
             continue;
@@ -537,7 +538,7 @@ int64_t sys_accept(int fd, void *user_addr, uint32_t *user_addrlen) {
 
     
     struct unix_socket *server_chan = sock_alloc();
-    if (!server_chan) return -ENOMEM;
+    if (!server_chan) { fdput(f); return -ENOMEM; }
 
     spin_lock(&server_chan->lock);
     spin_lock(&client_sock->lock);
@@ -555,6 +556,7 @@ int64_t sys_accept(int fd, void *user_addr, uint32_t *user_addrlen) {
     struct vnode *vn = vnode_alloc(S_IFSOCK, &unix_socket_ops);
     if (!vn) {
         sock_free(server_chan);
+        fdput(f);
         return -ENOMEM;
     }
     vn->data = server_chan;
@@ -562,6 +564,7 @@ int64_t sys_accept(int fd, void *user_addr, uint32_t *user_addrlen) {
     struct file *chan_file = file_alloc();
     if (!chan_file) {
         vput(vn);
+        fdput(f);
         return -ENOMEM;
     }
     chan_file->f_vn = vn;

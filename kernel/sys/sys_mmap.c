@@ -25,7 +25,7 @@ struct shared_page_entry {
 static struct shared_page_entry g_shared_pages[MAX_SHARED_PAGES];
 static spinlock_t g_shared_pages_lock = SPINLOCK_INITIALIZER;
 
-static void cleanup_stale_shared_pages_unlocked(void) {
+static void cleanup_stale_shared_pages_locked(void) {
     struct vnode *to_put[32];
     int count = 0;
 
@@ -53,9 +53,7 @@ static void cleanup_stale_shared_pages_unlocked(void) {
 
 uintptr_t vma_shared_lookup(struct vnode *vn, int64_t offset) {
     uint64_t flags = spin_lock_irqsave(&g_shared_pages_lock);
-    int entry_count = 0;
     for (int s = 0; s < MAX_SHARED_PAGES; s++) {
-        if (g_shared_pages[s].vn != NULL) entry_count++;
         if (g_shared_pages[s].vn == vn && g_shared_pages[s].file_offset == offset) {
             uintptr_t cached_paddr = g_shared_pages[s].phys_addr;
             page_t *pg = phys_to_page(cached_paddr);
@@ -77,9 +75,8 @@ uintptr_t vma_shared_lookup(struct vnode *vn, int64_t offset) {
 }
 
 void vma_shared_register(struct vnode *vn, int64_t offset, uintptr_t phys) {
-    cleanup_stale_shared_pages_unlocked();
-
     uint64_t flags = spin_lock_irqsave(&g_shared_pages_lock);
+    cleanup_stale_shared_pages_locked();
 
     for (int s = 0; s < MAX_SHARED_PAGES; s++) {
         if (g_shared_pages[s].vn == vn && g_shared_pages[s].file_offset == offset) {
@@ -124,7 +121,9 @@ void vma_shared_unregister(struct vnode *vn, int64_t offset) {
 }
 
 void vma_shared_cleanup(void) {
-    cleanup_stale_shared_pages_unlocked();
+    uint64_t flags = spin_lock_irqsave(&g_shared_pages_lock);
+    cleanup_stale_shared_pages_locked();
+    spin_unlock_irqrestore(&g_shared_pages_lock, flags);
 }
 
 int64_t sys_mmap(uintptr_t addr, size_t length, int prot, int flags, int fd, int64_t offset) {
@@ -411,21 +410,63 @@ int64_t sys_mprotect(uintptr_t start, size_t len, int prot) {
 
     up_write(&curproc->p_vma_lock);
 
-    // 페이지 매핑/보호 (demand paging 지원)
+    // 페이지 우선 할당 후 매핑
+    size_t num_missing = 0;
     for (uintptr_t i = addr; i < end; i += PAGE_SIZE) {
-        if (mmu_translate(map, i) == 0) {
-            page_t *pg = page_alloc(0);
-            if (!pg) return -ENOMEM;
-            uintptr_t phys = page_to_phys(pg);
+        if (mmu_translate(map, i) == 0) num_missing++;
+    }
+
+    page_t **new_pages = NULL;
+    uintptr_t *new_addrs = NULL;
+    int err = 0;
+    if (num_missing > 0) {
+        new_pages = kmalloc(sizeof(page_t *) * num_missing);
+        new_addrs = kmalloc(sizeof(uintptr_t) * num_missing);
+        if (!new_pages || !new_addrs) {
+            kfree(new_pages);
+            kfree(new_addrs);
+            return -ENOMEM;
+        }
+
+        size_t idx = 0;
+        for (uintptr_t i = addr; i < end && idx < num_missing; i += PAGE_SIZE) {
+            if (mmu_translate(map, i) == 0) {
+                page_t *pg = page_alloc(0);
+                if (!pg) { err = -ENOMEM; break; }
+                new_pages[idx] = pg;
+                new_addrs[idx] = i;
+                idx++;
+            }
+        }
+
+        if (err) {
+            for (size_t j = 0; j < idx; j++) page_free(new_pages[j], 0);
+            kfree(new_pages);
+            kfree(new_addrs);
+            return err;
+        }
+
+        for (size_t idx = 0; idx < num_missing; idx++) {
+            uintptr_t phys = page_to_phys(new_pages[idx]);
             memset(phys_to_virt(phys), 0, PAGE_SIZE);
-            if (!mmu_map_4k(map, i, phys, vma_flags | MMU_FLAGS_USER)) {
-                page_free(pg, 0);
+            if (!mmu_map_4k(map, new_addrs[idx], phys, vma_flags | MMU_FLAGS_USER)) {
+                page_free(new_pages[idx], 0);
+                for (size_t j = idx + 1; j < num_missing; j++) page_free(new_pages[j], 0);
+                kfree(new_pages);
+                kfree(new_addrs);
                 return -ENOMEM;
             }
-        } else {
+        }
+    }
+
+    for (uintptr_t i = addr; i < end; i += PAGE_SIZE) {
+        if (mmu_translate(map, i) != 0) {
             mmu_protect_page(map, i, prot);
         }
     }
+
+    kfree(new_pages);
+    kfree(new_addrs);
 
     return 0;
 }
@@ -527,8 +568,8 @@ int64_t sys_mremap(uintptr_t old_addr, size_t old_size, size_t new_size, int fla
                         return -EIO;
                     }
 
-                    cleanup_stale_shared_pages_unlocked();
                     uint64_t lock_flags = spin_lock_irqsave(&g_shared_pages_lock);
+                    cleanup_stale_shared_pages_locked();
                     uintptr_t double_check_paddr = 0;
                     for (int s = 0; s < MAX_SHARED_PAGES; s++) {
                         if (g_shared_pages[s].vn == orig_vn && g_shared_pages[s].file_offset == file_offset) {
@@ -696,8 +737,8 @@ int64_t sys_mremap(uintptr_t old_addr, size_t old_size, size_t new_size, int fla
                     return -EIO;
                 }
 
-                cleanup_stale_shared_pages_unlocked();
                 uint64_t lock_flags = spin_lock_irqsave(&g_shared_pages_lock);
+                cleanup_stale_shared_pages_locked();
                 uintptr_t double_check_paddr = 0;
                 for (int s = 0; s < MAX_SHARED_PAGES; s++) {
                     if (g_shared_pages[s].vn == orig_vn && g_shared_pages[s].file_offset == file_offset) {

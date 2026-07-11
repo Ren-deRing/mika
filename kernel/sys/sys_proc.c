@@ -451,12 +451,18 @@ int64_t sys_execve(const char *user_path, char *const argv[], char *const envp[]
 
     size_t allocated_size = 64 * 1024;
     void *elf_data = kmalloc(allocated_size);
+    if (!elf_data) { vput(vn); return -ENOMEM; }
     size_t file_size = 0;
 
     while (1) {
         if (file_size >= allocated_size) {
             size_t new_size = allocated_size * 2;
             void *new_buf = kmalloc(new_size);
+            if (!new_buf) {
+                kfree(elf_data);
+                vput(vn);
+                return -ENOMEM;
+            }
             memcpy(new_buf, elf_data, file_size);
             kfree(elf_data);
             elf_data = new_buf;
@@ -501,33 +507,29 @@ int64_t sys_execve(const char *user_path, char *const argv[], char *const envp[]
 
     // dprintf("[sys_execve] load_elf SUCCESS! entry: %p, interpreter_base: %p\n", entry_point, interpreter_base);
 
+    uintptr_t stack_top = USER_STACK_TOP;
+    uintptr_t stack_bottom = USER_STACK_TOP - USER_STACK_SIZE;
+
+    uintptr_t final_user_rsp = setup_user_stack(new_map, USER_STACK_TOP, argv, envp, phdr_vaddr, phnum, interpreter_base, original_entry);
+    if (final_user_rsp == 0 || (final_user_rsp % 16) != 0) {
+        dprintf("setup_user_stack FAILED. Misaligned RSP: %p\n", final_user_rsp);
+        mmu_destroy_map(new_map);
+        return -EFAULT;
+    }
+
     {
         down_write(&curproc->p_vma_lock);
         vma_remove_range(&curproc->p_vma_root, &curproc->p_vma_list, 0, ~0ULL);
         up_write(&curproc->p_vma_lock);
     }
 
-    uintptr_t stack_top = USER_STACK_TOP;
-    uintptr_t stack_bottom = USER_STACK_TOP - USER_STACK_SIZE;
-
-    struct vm_area *stack_vma = vma_alloc(stack_bottom, stack_top,
+    struct vm_area *exec_stack_vma = NULL;
+    exec_stack_vma = vma_alloc(stack_bottom, stack_top,
         MMU_FLAGS_USER | MMU_FLAGS_READ | MMU_FLAGS_WRITE, NULL, 0);
-    if (stack_vma) {
+    if (exec_stack_vma) {
         down_write(&curproc->p_vma_lock);
-        vma_insert(&curproc->p_vma_root, &curproc->p_vma_list, stack_vma);
+        vma_insert(&curproc->p_vma_root, &curproc->p_vma_list, exec_stack_vma);
         up_write(&curproc->p_vma_lock);
-    }
-
-    uintptr_t final_user_rsp = setup_user_stack(new_map, USER_STACK_TOP, argv, envp, phdr_vaddr, phnum, interpreter_base, original_entry);
-    if (final_user_rsp == 0 || (final_user_rsp % 16) != 0) {
-        dprintf("setup_user_stack FAILED. Misaligned RSP: %p\n", final_user_rsp);
-        if (stack_vma) {
-            down_write(&curproc->p_vma_lock);
-            vma_remove_range(&curproc->p_vma_root, &curproc->p_vma_list, stack_bottom, stack_top);
-            up_write(&curproc->p_vma_lock);
-        }
-        mmu_destroy_map(new_map);
-        return -EFAULT;
     }
 
     struct file *to_close[MAX_FILES];

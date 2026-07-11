@@ -76,3 +76,4 @@ Test suite in `user/init/init.c` — single process (PID 1), single-threaded tes
 - Page fault handler at `kernel/arch/x86_64/mmu.c:870` prints CR2, RIP, error code
 - General exception handler at `kernel/arch/x86_64/idt.c:139` prints vector number, RIP, error code
 - SIGSEGV delivery: `kernel/sys/sys_sig.c:56` (`check_signals`)
+- Kernel is compiled with `-fomit-frame-pointer` (default at `-O2`), so RBP-based stack traces in panic dumps are unreliable.

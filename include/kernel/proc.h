@@ -67,8 +67,6 @@ struct posix_timer {
     uint64_t pt_value_ns;
 };
 
-#define T_KSTACK_KMALLOC 1
-
 // TCB
 struct thread {
     tid_t            t_tid;
