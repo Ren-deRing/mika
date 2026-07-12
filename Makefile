@@ -1,4 +1,4 @@
-OUTPUT := doppio
+OUTPUT := mika
 ARCH   ?= x86_64
 
 export BASE_DIR   := $(shell pwd)
@@ -10,7 +10,7 @@ export USER_OBJ_DIR := $(OBJ_DIR)/user
 export USER_BIN_DIR := $(BUILD_DIR)/rootfs/bin
 export USER_LIB_DIR := $(BUILD_DIR)/rootfs/lib
 
-ISO_IMAGE := $(BIN_DIR)/doppio.iso
+ISO_IMAGE := $(BIN_DIR)/mika.iso
 ISO_ROOT  := $(BUILD_DIR)/iso_root
 
 INITRD_ROOT := $(BASE_DIR)/rootfs

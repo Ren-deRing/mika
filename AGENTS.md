@@ -1,4 +1,4 @@
-# Doppio OS (SMP-ready)
+# Mika OS (SMP-ready)
 
 ## Communication
 ## Security notes

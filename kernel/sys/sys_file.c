@@ -558,7 +558,7 @@ int64_t sys_ioctl_impl(int fd, uint64_t request_raw, void *arg) {
             }
             else if (request == FBIOGET_FSCREENINFO) {
                 struct our_fb_fix_screeninfo fb_fix = {0};
-                strcpy(fb_fix.id, "Doppio FB");
+                strcpy(fb_fix.id, "Mika FB");
                 fb_fix.smem_start = (unsigned long)g_boot_info.fb.fb_addr;
                 fb_fix.smem_len = g_boot_info.fb.pitch * g_boot_info.fb.height;
                 fb_fix.type = 0; // FB_TYPE_PACKED_PIXELS

@@ -385,7 +385,7 @@ int64_t drm_ioctl(struct file *f, uint32_t request, void *arg) {
             mode.vrefresh = 60;
             mode.flags = 0;
             mode.type = 72; // DRM_MODE_TYPE_PREFERRED | DRM_MODE_TYPE_DRIVER
-            strcpy(mode.name, "Doppio Mode");
+            strcpy(mode.name, "Mika Mode");
             if (copy_to_user((void*)conn.modes_ptr, &mode, sizeof(struct drm_mode_modeinfo)) < 0) return -EFAULT;
         }
 
@@ -416,7 +416,7 @@ int64_t drm_ioctl(struct file *f, uint32_t request, void *arg) {
         crtc.mode.vrefresh = 60;
         crtc.mode.flags = 0;
         crtc.mode.type = 72;
-        strcpy(crtc.mode.name, "Doppio Mode");
+        strcpy(crtc.mode.name, "Mika Mode");
 
         if (copy_to_user(arg, &crtc, sizeof(struct drm_mode_get_crtc)) < 0) return -EFAULT;
         return 0;
