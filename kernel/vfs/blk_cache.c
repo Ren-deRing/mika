@@ -107,8 +107,6 @@ static void blk_cache_init(void) {
     blk_cache_next = 0;
     for (int i = 0; i < BLK_CACHE_SIZE; i++)
         blk_cache[i].valid = 0;
-    dprintf("[BLK_CACHE] Initialised (%d entries, %d KB)\n",
-            BLK_CACHE_SIZE, (BLK_CACHE_SIZE * 512) / 1024);
 }
 
 dev_initcall(blk_cache_init);

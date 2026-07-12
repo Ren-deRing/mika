@@ -1140,10 +1140,6 @@ static struct vnode *ext2_mount(struct vnode *dev_vp, void *data) {
         fs->bg_desc_start = 1;
     }
 
-    dprintf("[EXT2] Mounted: block_size=%u, blocks=%u, inodes=%u, bg_desc_start=%u\n",
-            fs->block_size, sb->s_blocks_count,
-            fs->inodes_count, fs->bg_desc_start);
-
     // Read root inode (inode 2)
     struct ext2_inode root_inode;
     if (ext2_read_inode(fs, EXT2_ROOT_INO, &root_inode) < 0) {
@@ -1157,9 +1153,6 @@ static struct vnode *ext2_mount(struct vnode *dev_vp, void *data) {
         kfree(fs);
         return NULL;
     }
-
-    dprintf("[EXT2] Root inode %d, size=%u, mode=0x%x\n",
-            EXT2_ROOT_INO, root_inode.i_size, root_inode.i_mode);
 
     return root_vn;
 }

@@ -1172,6 +1172,8 @@ out:
 static void test_ext2_read(void) {
     TEST("ext2 filesystem read via /mnt/testfile.txt");
 
+    printf("I deleted file, so this should fail.\n");
+
     int fd = open("/mnt/testfile.txt", O_RDONLY);
     if (fd < 0) { FAIL("open /mnt/testfile.txt"); return; }
 

@@ -221,7 +221,6 @@ int ahci_probe(volatile struct ahci_hba *hba, int port_idx) {
 
     uint32_t sig = *(volatile uint32_t *)((uintptr_t)&hba->ports[port_idx] + AHCI_PORT_SIG);
     if (sig != 0x00000101 && sig != 0x00000000) {
-        dprintf("[AHCI] Port %d signature 0x%08x (non-ATA, skipping)\n", port_idx, sig);
         return -1;
     }
 
@@ -280,9 +279,6 @@ static int ahci_pci_callback(struct pci_dev *pdev, void *ctx) {
         pdev->subclass != AHCI_PCI_SUBCLASS) {
         return 0; // not AHCI
     }
-
-    dprintf("[AHCI] Found AHCI controller at %02x:%02x.%x\n",
-            pdev->bus, pdev->slot, pdev->func);
 
     int abar_idx = 5;
     uint64_t abar_phys = pdev->bar[abar_idx];

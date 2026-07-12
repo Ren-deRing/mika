@@ -127,8 +127,6 @@ __no_sanitize_address void __asan_report_store_n(uintptr_t addr, uintptr_t size)
 }
 
 __no_sanitize_address void kasan_init(void) {
-    dprintf("[KASAN] Shadow range: 0x%lx - 0x%lx\n",
-            (uintptr_t)KASAN_SHADOW_START, (uintptr_t)KASAN_SHADOW_END);
 }
 
 mem_initcall(kasan_init, PRIO_THIRD);

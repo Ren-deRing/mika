@@ -100,9 +100,6 @@ Test suite in `user/init/init.c` — single process (PID 1), single-threaded tes
 - `sched_boost`'s `last_boost_tick` is a global `static` — CPU race on read-modify.
 - `write_unlock` (rwlock) uses plain store, not atomic release.
 
-### Pre-existing test failures
-- `SCM_RIGHTS multi-fd`: fails "recv 3 fds" — socket SCM_RIGHTS not fully implemented.
-
 ## VFS
 - `vfs/ramfs.c` — in-memory filesystem
 - `vfs/initrd.c` — initrd cpio archive loader
