@@ -24,7 +24,8 @@ struct interrupt_controller {
 
     void (*start_timer)(uint32_t ms, uint8_t vector);
 
-    // TODO: MSI
+    int  (*alloc_vector)(void);
+    void (*free_vector)(int vector);
 };
 
 extern struct interrupt_controller* g_intc;

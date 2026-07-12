@@ -1,6 +1,16 @@
 # Doppio OS (SMP-ready)
 
 ## Communication
+## Security notes
+- **SMEP/SMAP**: Do NOT enable in `early.c` until user-space pointer validation (`copy_from_user` bounce buffer) is added to ALL vnode write paths. Without the bounce buffer, SMAP would fault on every `ext2_write`/`ramfs_write` call.
+- **Signal semantics**: Signal actions are per-`struct thread`, not per-`struct proc`. This is intentional for now — `CLONE_SIGHAND` is not implemented, so each thread has its own handler table.
+- **`st_ino` field**: Currently leaks kernel vnode pointers to userspace. Fix: use a monotonically-increasing counter or hash of the pointer instead.
+
+## Audit history
+
+2026-07-12: Full audit (see Known Issues above).
+
+## Response convention
 - Respond in Korean.
 - Think/reason in English (use English for analysis, debugging thoughts).
 - When user asks in Korean, answer in Korean.
@@ -41,26 +51,57 @@
 - `kernel/misc/` — kstack (kernel stack allocator, remaining misc)
 - Entry: `boot/` (Limine protocol), `kernel/arch/x86_64/early.c`, `kernel/generic.c`
 
-## Notable Issues & Quirks
-
-### ELF Loader Ignores Segment Permissions
-`kernel/proc/elf.c` lines 68 and 208 map all `PT_LOAD` segments with `MMU_FLAGS_USER | MMU_FLAGS_WRITE | MMU_FLAGS_EXEC` regardless of `p_flags`. `.data.rel.ro` is mapped writable and executable. Compare with `kernel/arch/x86_64/mmu.c:483` which correctly checks `PF_W`/`PF_X` for the kernel's own mapping.
-
-### No RELRO or PT_GNU_STACK handling
-Kernel ELF loader doesn't handle `PT_GNU_RELRO` or `PT_GNU_STACK` — RELRO pages remain writable, and there's no NX stack enforcement.
-
-### Copy-on-Write
-Implemented in `kernel/arch/x86_64/mmu.c:870`, `mmu_protect_page`, and `vmm_map`. CoW uses `X86_PTE_COW` bit. When CoW is triggered, the page is copied and made writable. Race conditions in CoW are handled with re-validation of PTE.
-
-### Page Table Locking
-`mmu_get_lock` returns per-PML4 spinlock. All `mmu_map/unmap/protect` operations take this lock. `vmm_get_pte` does NOT take the lock.
-
-### DMA / framebuffer
-Simple linear framebuffer mapped from boot info. GPU-related syscalls in `sys_drm.c` (likely stubs).
-
 ## Testing
 
 Test suite in `user/init/init.c` — single process (PID 1), single-threaded tests, some with fork/clone. Tests use `printf`/`fflush` via musl. To add a test: add function, add call in `main()`. Tests run sequentially until crash.
+
+## Known Issues (2026-07-12 Audit)
+
+### CRITICAL (fix pending)
+- **SMEP/SMAP disabled**: CR4 lacks bit20/21. Cannot enable until a bounce-buffer write path exists (see Security notes).
+- **`sys_write` bypasses `copy_from_user`**: passes `user_buf` directly to `vfs_write` → ext2/ramfs `memcpy` from user ptr. Works because SMAP is off, but breaks under SMAP.
+- **`sys_kill`/`sys_tgkill`**: no UID permission check — any process can kill/tkill any other process.
+- **ext2 SMP locking**: no per-filesystem lock → bitmap/inode/dir corruption under concurrent access.
+- **`proc_put` TOCTOU**: two concurrent `proc_put` calls can double-free `struct proc` (use-after-free).
+- **`vfs_open` `O_CREAT|O_EXCL`**: silently overwrites existing file instead of returning `-EEXIST`.
+- **`child_name` buffer overflow**: `vfs.c:367` `child_name[NAME_MAX]` (255) overflows via `strcpy(child_name, clean_path)` when `clean_path` is 255 chars.
+- **`ext2_set_block_ptr` indirect/dind/tind writes wrong block**: `tmp` reused after `ext2_read_block`, so `tmp[ind_idx]` no longer holds the block number (lines 361-369, 409-425).
+
+### HIGH (fix pending)
+- **Syscall table misassignments**: `[55]=sys_lchown` (should be `getsockopt`), `[273]=sys_eventfd` (should be `set_robust_list`). `getsockopt` silently no-ops; `pthread_create` doesn't register robust list.
+- **`st_ino`/`d_ino` leaks kernel pointer**: vnode virtual addresses returned to userspace as inode numbers → KASLR bypass.
+- **`O_APPEND` ignored**: `vfs_write` always writes at `f->f_pos`, not at file end.
+- **`O_TRUNC` ignored**: opening existing file with `O_TRUNC` does not truncate.
+- **`setup_user_stack` buffer overflow**: `TMP_STACK_SIZE=16384` — arg/env/auxv exceeding 16KB corrupts kernel heap.
+- **`sys_epoll_wait` integer overflow**: `sizeof(epoll_event) * maxevents` wraps; heap buffer overflow.
+- **`vmm_unmap` page-table leak**: intermediate tables freed without parent-refcount update.
+- **Busy filesystem umount**: `vfs_umount` doesn't check open files → use-after-free.
+- **`mremap`/`sys_mmap` ignores flags**: `(void)flags;` — `MAP_SHARED`/`MAP_PRIVATE`/`MAP_ANONYMOUS` not enforced.
+- **CPIO initrd no bounds-check**: malformed cpio can cause arbitrary kernel memory read/write.
+
+### MEDIUM (fix pending)
+- `CLONE_VM`/`CLONE_SIGHAND`/`CLONE_FILES` defined but never checked in `sys_clone`.
+- `sched_yield` (syscall 24) not implemented.
+- `thread_create` modifies `p_threads` without `p_lock` — data race with `sys_exit`.
+- `rwlock`/`rwsem` writer starvation — readers can starve writers indefinitely.
+- Framebuffer mmap creates no VMA — tracked only in page table.
+- `add_wait_queue` uses `spin_lock` (not `_irqsave`) → potential IRQ deadlock.
+- PID wraps `INT_MAX` with no collision check.
+- `ext2_truncate_blocks` only frees direct blocks — indirect blocks leak.
+- `ext2_create`/`remove` can leak inodes/blocks on error paths.
+- `blk_cache_flush` holds spinlock during disk I/O.
+- `pivot_root` modifies mount list without `mount_lock`.
+- `FBIOGET_FSCREENINFO` leaks physical framebuffer address via `smem_start`.
+- Block-cache has no invalidation mechanism — stale data after direct disk writes.
+- `ext2_write` computes `i_blocks` from `i_size`, not actual allocation count.
+- `sys_access`/`faccessat` ignores mode bits — only checks path existence.
+- `ramfs_rmdir` TOCTOU between empty-check and remove.
+- `do_softirq` drops `RCU_SOFTIRQ` on loop-limit re-raise.
+- `sched_boost`'s `last_boost_tick` is a global `static` — CPU race on read-modify.
+- `write_unlock` (rwlock) uses plain store, not atomic release.
+
+### Pre-existing test failures
+- `SCM_RIGHTS multi-fd`: fails "recv 3 fds" — socket SCM_RIGHTS not fully implemented.
 
 ## VFS
 - `vfs/ramfs.c` — in-memory filesystem

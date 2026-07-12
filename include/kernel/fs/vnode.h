@@ -26,6 +26,9 @@ struct vnode_ops {
     int (*remove)(struct vnode *dvp, const char *name);
     int (*rmdir)(struct vnode *dvp, const char *name);
     int (*rename)(struct vnode *sdvp, const char *sname, struct vnode *tdvp, const char *dname);
+    int (*mmap)(struct vnode *vp, uintptr_t *addr_out, uintptr_t addr_hint,
+                size_t length, int prot, int flags);
+    int (*poll)(struct vnode *vp, int events);
 };
 
 struct vnode {
@@ -43,6 +46,8 @@ struct vnode {
     struct vnode *v_parent;
     char v_name[32];
     int  v_reclaimable;
+    uint32_t rdev;  // device id
+    uint64_t v_ino;
 };
 
 static inline int vref(struct vnode *vn) {

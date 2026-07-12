@@ -8,6 +8,7 @@
 .vscode
 .cache
 
+/disk.img
 *.o
 *.so
 *.a

@@ -14,6 +14,7 @@
 
 #include <kernel/fs/vfs.h>
 #include <kernel/fs/vnode.h>
+#include <kernel/blk_cache.h>
 
 #include <uapi/sys/stat.h>
 #include <uapi/fcntl.h>
@@ -113,7 +114,9 @@ int64_t sys_write(int fd, const void *user_buf, size_t count) {
 
     if (f->f_vn && strcmp(f->f_vn->v_name, "fb0") == 0) {
         size_t fb_size = g_boot_info.fb.pitch * g_boot_info.fb.height;
-        if (f->f_pos >= fb_size) { fdput(f); return 0; }
+        if (f->f_pos >= fb_size) {     fdput(f);
+    return 0;
+}
         size_t actual_count = count;
         if (f->f_pos + actual_count > fb_size) {
             actual_count = fb_size - f->f_pos;
@@ -214,6 +217,56 @@ int64_t sys_readv(int fd, const void *user_iov, int iovcnt) {
     return total;
 }
 
+#define RWF_APPEND  0x20
+
+static int64_t preadv2_common(int fd, const void *user_iov, int iovcnt,
+                               uint64_t pos_l, uint64_t pos_h, int flags, int is_write) {
+    if (fd < 0 || fd >= MAX_FILES) return -EBADF;
+    if (iovcnt <= 0 || iovcnt > 1024) return -EINVAL;
+
+    typedef struct { void *base; size_t len; } kiov_t;
+    if (!is_user_address_range(user_iov, iovcnt * sizeof(kiov_t)))
+        return -EFAULT;
+
+    kiov_t *kiov = kmalloc(iovcnt * sizeof(kiov_t));
+    if (!kiov) return -ENOMEM;
+    if (copy_from_user(kiov, user_iov, iovcnt * sizeof(kiov_t)) < 0)
+        { kfree(kiov); return -EFAULT; }
+
+    off_t offset = (off_t)(((uint64_t)pos_h << 32) | pos_l);
+    int use_current = (offset == -1) || (is_write && (flags & RWF_APPEND));
+
+    int64_t total = 0;
+    for (int i = 0; i < iovcnt; i++) {
+        if (kiov[i].len == 0) continue;
+        int64_t r;
+        if (use_current) {
+            r = is_write ? sys_write(fd, kiov[i].base, kiov[i].len)
+                         : sys_read(fd, kiov[i].base, kiov[i].len);
+        } else {
+            r = is_write ? sys_pwrite64(fd, kiov[i].base, kiov[i].len, offset)
+                         : sys_pread64(fd, kiov[i].base, kiov[i].len, offset);
+            if (r > 0) offset += r;
+        }
+        if (r < 0) { kfree(kiov); return total > 0 ? total : r; }
+        total += r;
+        if (!is_write && r < (int64_t)kiov[i].len) break;
+    }
+
+    kfree(kiov);
+    return total;
+}
+
+int64_t sys_preadv2(int fd, const void *user_iov, int iovcnt,
+                     uint64_t pos_l, uint64_t pos_h, int flags) {
+    return preadv2_common(fd, user_iov, iovcnt, pos_l, pos_h, flags, 0);
+}
+
+int64_t sys_pwritev2(int fd, const void *user_iov, int iovcnt,
+                      uint64_t pos_l, uint64_t pos_h, int flags) {
+    return preadv2_common(fd, user_iov, iovcnt, pos_l, pos_h, flags, 1);
+}
+
 int64_t sys_open(const char *user_path, int flags, int mode) {
     char kpath[256];
     if (copy_str_from_user(kpath, user_path, 256) < 0) return -EFAULT;
@@ -288,6 +341,77 @@ int64_t sys_read(int fd, void *user_buf, size_t count) {
             fdput(f);
             return -EFAULT;
         }
+        total += n;
+    }
+
+    fdput(f);
+    return (int64_t)total;
+}
+
+static ssize_t vn_pread(struct vnode *vp, int fd, void *buf, size_t count, off_t offset) {
+    if (!vp->ops || !vp->ops->read) return -ENOSYS;
+    if (strcmp(vp->v_name, "kbd") == 0 || strcmp(vp->v_name, "tty") == 0)
+        return tty_read(buf, count);
+    return vp->ops->read(vp, buf, count, offset);
+}
+
+static ssize_t vn_pwrite(struct vnode *vp, int fd, const void *buf, size_t count, off_t offset) {
+    if (!vp->ops || !vp->ops->write) return -ENOSYS;
+    if (strcmp(vp->v_name, "tty") == 0)
+        return tty_write(buf, count);
+    return vp->ops->write(vp, buf, count, offset);
+}
+
+int64_t sys_pread64(int fd, void *user_buf, size_t count, int64_t offset) {
+    if (count == 0) return 0;
+    if (!is_user_address_range(user_buf, count)) return -EFAULT;
+
+    struct file *f = fdget(fd);
+    if (!f) return -EBADF;
+    if (!f->f_vn) { fdput(f); return -ESPIPE; }
+
+    char kbuf[4096];
+    size_t total = 0;
+
+    while (total < count) {
+        size_t to_copy = count - total;
+        if (to_copy > sizeof(kbuf)) to_copy = sizeof(kbuf);
+
+        int n = vn_pread(f->f_vn, fd, kbuf, to_copy, (off_t)(offset + total));
+        if (n < 0) { fdput(f); return (total == 0) ? n : (int64_t)total; }
+        if (n == 0) break;
+
+        if (copy_to_user((char *)user_buf + total, kbuf, n) < 0)
+            { fdput(f); return -EFAULT; }
+        total += n;
+    }
+
+    fdput(f);
+    return (int64_t)total;
+}
+
+int64_t sys_pwrite64(int fd, const void *user_buf, size_t count, int64_t offset) {
+    if (count == 0) return 0;
+    if (!is_user_address_range(user_buf, count)) return -EFAULT;
+
+    struct file *f = fdget(fd);
+    if (!f) return -EBADF;
+    if (!f->f_vn) { fdput(f); return -ESPIPE; }
+
+    char kbuf[4096];
+    size_t total = 0;
+
+    while (total < count) {
+        size_t to_copy = count - total;
+        if (to_copy > sizeof(kbuf)) to_copy = sizeof(kbuf);
+
+        if (copy_from_user(kbuf, (const char *)user_buf + total, to_copy) < 0)
+            { fdput(f); return -EFAULT; }
+
+        int n = vn_pwrite(f->f_vn, fd, kbuf, to_copy, (off_t)(offset + total));
+        if (n < 0) { fdput(f); return (total == 0) ? n : (int64_t)total; }
+        if (n == 0) break;
+
         total += n;
     }
 
@@ -462,53 +586,29 @@ int64_t sys_ioctl_impl(int fd, uint64_t request_raw, void *arg) {
                 if (copy_to_user(arg, &val, sizeof(int)) < 0) { ret = -EFAULT; goto done; }
                 ret = 0; goto done;
             }
-            else if (request == 0x4B45) { // KDSKBMODE
-                ret = 0; goto done;
-            }
-            else if (request == 0x5401) { // TCGETS
-                struct our_termios term = {0};
-                term.c_iflag = 0x0500; // ICRNL | IXON
-                term.c_oflag = 0x0005; // OPOST | ONLCR
-                term.c_cflag = 0x0BF0; // B9600 | CS8 | CREAD | HUPCL
-                term.c_lflag = 0x8A3B; // ISIG | ICANON | ECHO | ECHOE | ECHOK | IEXTEN
+            else if (request == 0x4B45) { ret = 0; goto done; }
+            else if (request == 0x5401) {
+                struct { unsigned int c_iflag, c_oflag, c_cflag, c_lflag; } term
+                    = { 0x0500, 0x0005, 0x0BF0, 0x8A3B };
                 if (!is_user_address_range(arg, sizeof(term))) { ret = -EFAULT; goto done; }
                 if (copy_to_user(arg, &term, sizeof(term)) < 0) { ret = -EFAULT; goto done; }
                 ret = 0; goto done;
             }
-            else if (request == 0x5402 || request == 0x5403 || request == 0x5404) { // TCSETS / W / F
+            else if (request == 0x5402 || request == 0x5403 || request == 0x5404) { ret = 0; goto done; }
+            else if (request == 0x5603) {
+                struct { unsigned short a,b,c; } st = {1,0,1};
+                if (!is_user_address_range(arg, sizeof(st))) { ret = -EFAULT; goto done; }
+                if (copy_to_user(arg, &st, sizeof(st)) < 0) { ret = -EFAULT; goto done; }
                 ret = 0; goto done;
             }
-            else if (request == 0x5603) { // VT_GETSTATE
-                struct {
-                    unsigned short v_active;
-                    unsigned short v_signal;
-                    unsigned short v_state;
-                } state = {0};
-                state.v_active = 1;
-                state.v_state = 1;
-                if (!is_user_address_range(arg, sizeof(state))) { ret = -EFAULT; goto done; }
-                if (copy_to_user(arg, &state, sizeof(state)) < 0) { ret = -EFAULT; goto done; }
-                ret = 0; goto done;
-            }
-            else if (request == 0x5601) { // VT_GETMODE
-                struct {
-                    char mode;
-                    char waitv;
-                    short relsig;
-                    char acqsig;
-                    char frsig;
-                } mode = {0};
-                mode.mode = 0;
+            else if (request == 0x5601) { // VT_GETSTATE
+                char mode[6] = {0};
                 if (!is_user_address_range(arg, sizeof(mode))) { ret = -EFAULT; goto done; }
                 if (copy_to_user(arg, &mode, sizeof(mode)) < 0) { ret = -EFAULT; goto done; }
                 ret = 0; goto done;
             }
-            else if (request == 0x5602 || request == 0x5605 || request == 0x5606 || request == 0x5607) { // VT_SETMODE / VT_RELDISP / VT_ACTIVATE / VT_WAITACTIVE
-                ret = 0; goto done;
-            }
-            else if (request == 0x4B3A) { // KDSETMODE
-                ret = 0; goto done;
-            }
+            else if (request == 0x5602 || request == 0x5605 || request == 0x5606 || request == 0x5607) { ret = 0; goto done; }
+            else if (request == 0x4B3A) { ret = 0; goto done; } // KDSETMODE
             else if (request == 0x4B3B) { // KDGETMODE
                 int val = 0;
                 if (!is_user_address_range(arg, sizeof(int))) { ret = -EFAULT; goto done; }
@@ -639,6 +739,11 @@ int64_t sys_fallocate(int fd, int mode, int64_t offset, int64_t len) {
         }
     }
     fdput(f);
+    return 0;
+}
+
+int64_t sys_sync(void) {
+    blk_cache_flush_all();
     return 0;
 }
 

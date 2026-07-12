@@ -93,6 +93,14 @@ musl_build: download
 	fi
 
 setup: musl_build
+	@if [ ! -f "$(BASE_DIR)/disk.img" ]; then \
+		echo "[SETUP] Creating ext2 disk image..."; \
+		dd if=/dev/zero of=$(BASE_DIR)/disk.img bs=1M count=256 status=none; \
+		mkfs.ext2 -b 1024 -F $(BASE_DIR)/disk.img >/dev/null 2>&1; \
+		echo "[SETUP] disk.img ready at $(BASE_DIR)/disk.img"; \
+	else \
+		echo "[SETUP] disk.img already exists, skipping"; \
+	fi
 
 iso: all
 	@rm -rf $(ISO_ROOT)
@@ -155,7 +163,10 @@ run: iso
 		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
 		-bios /usr/share/ovmf/OVMF.fd \
 		-serial stdio -smp 4 -accel kvm -cpu host \
-		-vga std -s
+		-vga std -s \
+		-drive file=$(BASE_DIR)/disk.img,format=raw,id=hd0,if=none \
+		-device ahci,id=ahci \
+		-device ide-hd,drive=hd0,bus=ahci.0
 
 clean:
 	rm -rf $(BUILD_DIR) $(BIN_DIR)

@@ -167,6 +167,12 @@ int64_t sys_rt_sigreturn(void) {
     return curthread->t_trapframe->rax;
 }
 
+static int kill_permit_check(struct proc *target) {
+    if (curproc == target) return 0;
+    if (curproc->p_euid == target->p_uid || curproc->p_euid == target->p_euid) return 0;
+    return -EPERM;
+}
+
 int64_t sys_kill(pid_t pid, int sig) {
     if (sig < 1 || sig >= NSIG) {
         return -EINVAL;
@@ -176,6 +182,9 @@ int64_t sys_kill(pid_t pid, int sig) {
     if (!p) {
         return -ESRCH;
     }
+
+    int perm = kill_permit_check(p);
+    if (perm < 0) { proc_put(p); return perm; }
 
     uint64_t flags = spin_lock_irqsave(&p->p_lock);
     struct thread *t = p->p_threads;
@@ -266,6 +275,9 @@ int64_t sys_tkill(int tid, int sig) {
 int64_t sys_tgkill(int tgid, int tid, int sig) {
     struct proc *p = find_proc(tgid);
     if (!p) return -ESRCH;
+
+    int perm = kill_permit_check(p);
+    if (perm < 0) { proc_put(p); return perm; }
 
     uint64_t flags = spin_lock_irqsave(&p->p_lock);
     struct thread *t = p->p_threads;

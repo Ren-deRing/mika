@@ -14,7 +14,7 @@ USER_CFLAGS  := -g -O1 -ffreestanding -fno-stack-protector \
 
 USER_LDFLAGS := -m elf_x86_64 -nostdlib -static \
                 -Ttext 0x400000 \
-                -L$(MUSL_OUT_DIR)/lib -lc \
+                -L$(MUSL_OUT_DIR)/lib -lc -lgbm \
                 -z separate-code -z max-page-size=0x1000
 
 .PHONY: all clean libc.a

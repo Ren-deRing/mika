@@ -111,6 +111,8 @@ static syscall_t syscall_table[] = {
     [14] = (syscall_t)sys_rt_sigprocmask,
     [15] = (syscall_t)sys_rt_sigreturn,
     [16] = (syscall_t)sys_ioctl,
+    [17] = (syscall_t)sys_pread64,
+    [18] = (syscall_t)sys_pwrite64,
     [19] = (syscall_t)sys_readv,
     [20] = (syscall_t)sys_writev,
     [21] = (syscall_t)sys_access,
@@ -162,6 +164,9 @@ static syscall_t syscall_table[] = {
     [112] = (syscall_t)sys_setsid,
     [117] = (syscall_t)sys_setresuid,
     [158] = (syscall_t)sys_arch_prctl,
+    [133] = (syscall_t)sys_mknod,
+    [155] = (syscall_t)sys_pivot_root,
+    [162] = (syscall_t)sys_sync,
     [165] = (syscall_t)sys_mount,
     [200] = (syscall_t)sys_tkill,
     [201] = (syscall_t)sys_time,
@@ -194,6 +199,8 @@ static syscall_t syscall_table[] = {
     [318] = (syscall_t)sys_getrandom,
     [319] = (syscall_t)sys_memfd_create,
     [324] = (syscall_t)sys_membarrier,
+    [327] = (syscall_t)sys_preadv2,
+    [328] = (syscall_t)sys_pwritev2,
     [439] = (syscall_t)sys_faccessat2,
 };
 

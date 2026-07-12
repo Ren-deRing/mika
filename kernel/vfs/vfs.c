@@ -10,7 +10,9 @@
 
 #include <kernel/fs/vfs.h>
 #include <kernel/fs/ramfs.h>
+#include <kernel/fs/mount.h>
 #include <kernel/fs/vnode.h>
+#include <kernel/cdev.h>
 #include <kernel/kmem.h>
 #include <kernel/init.h>
 #include <kernel/printf.h>
@@ -34,6 +36,18 @@ void vfs_init(void) {
     g_root_vnode = ramfs_create_vnode(S_IFDIR);
     if (!g_root_vnode) return;
 
+    struct mount *root_mnt = kmalloc(sizeof(struct mount));
+    if (root_mnt) {
+        memset(root_mnt, 0, sizeof(*root_mnt));
+        root_mnt->mnt_root = g_root_vnode;
+        root_mnt->mnt_mountpoint = g_root_vnode;
+        root_mnt->mnt_flags = MOUNTED;
+        g_root_vnode->mnt = root_mnt;
+        spin_lock(&mount_lock);
+        list_add_tail(&root_mnt->mnt_list, &mount_list);
+        spin_unlock(&mount_lock);
+    }
+
     g_root_vnode->ops->mkdir(g_root_vnode, "bin", 0755);
     g_root_vnode->ops->mkdir(g_root_vnode, "etc", 0755);
     g_root_vnode->ops->mkdir(g_root_vnode, "dev", 0755);
@@ -50,15 +64,20 @@ void vfs_init(void) {
         struct vnode *fb0_vn;
         struct vnode *kbd_vn;
         dev_vn->ops->create(dev_vn, "null", S_IFCHR | 0666, &null_vn);
+        if (null_vn) null_vn->rdev = (1 << 8) | 3;
         dev_vn->ops->create(dev_vn, "tty", S_IFCHR | 0666, &tty_vn);
+        if (tty_vn) tty_vn->rdev = (5 << 8) | 0;
         dev_vn->ops->create(dev_vn, "fb0", S_IFCHR | 0666, &fb0_vn);
+        if (fb0_vn) fb0_vn->rdev = (29 << 8) | 0;
         dev_vn->ops->create(dev_vn, "kbd", S_IFCHR | 0666, &kbd_vn);
+        if (kbd_vn) kbd_vn->rdev = (13 << 8) | 64;
 
         dev_vn->ops->mkdir(dev_vn, "dri", 0755);
         struct vnode *dri_vn = NULL;
         if (dev_vn->ops->lookup(dev_vn, "dri", &dri_vn) == 0) {
             struct vnode *card0_vn = NULL;
             dri_vn->ops->create(dri_vn, "card0", S_IFCHR | 0666, &card0_vn);
+            if (card0_vn) card0_vn->rdev = (226 << 8) | 0;
             vput(dri_vn);
             if (card0_vn) vput(card0_vn);
         }
@@ -185,6 +204,15 @@ int vfs_lookup_impl(const char *path, struct vnode *base, int follow_last, int d
 
     vref(curr);
 
+    {
+        struct vnode *mnt_root = mount_point_follow(curr);
+        if (mnt_root != curr) {
+            vput(curr);
+            curr = mnt_root;
+            vref(curr);
+        }
+    }
+
     char name[NAME_MAX + 1];
     const char *next = path;
 
@@ -219,6 +247,13 @@ int vfs_lookup_impl(const char *path, struct vnode *base, int follow_last, int d
 
         vput(curr);
         curr = found;
+
+        struct vnode *mnt_root = mount_point_follow(curr);
+        if (mnt_root != curr) {
+            vput(curr);
+            curr = mnt_root;
+            vref(curr);
+        }
     }
 
     if (curr->type == S_IFLNK && follow_last) {
@@ -368,6 +403,13 @@ int vfs_open(const char *path, int flags, mode_t mode, int *fd_out) {
     f->f_vn = vp;
     f->f_flags = flags;
     f->f_pos = 0;
+
+    if (S_ISCHR(vp->type)) {
+        int major = (vp->rdev >> 8) & 0xff;
+        struct cdev *cd = cdev_get(major);
+        if (cd && cd->ops)
+            vp->ops = cd->ops;
+    }
 
     int fd = proc_alloc_fd(p, f);
     if (fd < 0) { file_close(f); return fd; }

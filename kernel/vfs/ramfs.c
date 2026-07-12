@@ -437,6 +437,7 @@ int ramfs_getattr(struct vnode *vp, struct stat *st) {
     st->st_atim = node->atime;
     st->st_mtim = node->mtime;
     st->st_ctim = node->ctime;
+    st->st_rdev = vp->rdev;
     st->st_blksize = 4096;
     st->st_blocks = (node->size + 511) / 512;
 

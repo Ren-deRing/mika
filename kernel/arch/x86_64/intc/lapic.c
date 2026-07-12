@@ -22,6 +22,27 @@ struct interrupt_controller* g_intc = NULL;
 #define LAPIC_TCCR          0x0390
 #define LAPIC_TDCR          0x03E0
 
+static uint32_t vector_bitmap[8];
+
+static int lapic_alloc_vector(void) {
+    for (int vec = 48; vec < 256; vec++) {
+        int idx = vec / 32;
+        int bit = vec % 32;
+        if (!(vector_bitmap[idx] & (1u << bit))) {
+            vector_bitmap[idx] |= (1u << bit);
+            return vec;
+        }
+    }
+    return -1;
+}
+
+static void lapic_free_vector(int vector) {
+    if (vector < 0 || vector >= 256) return;
+    int idx = vector / 32;
+    int bit = vector % 32;
+    vector_bitmap[idx] &= ~(1u << bit);
+}
+
 static inline void lapic_write(uint32_t reg, uint32_t val) {
     *(volatile uint32_t*)(acpi_info.lapic_addr + reg) = val;
 }
@@ -104,9 +125,21 @@ void x86_intc_register(uint8_t vector, handler_t handler, void *data) {
     register_handler(vector, handler, data);
 }
 
+uint32_t x86_get_cpu_id(int index) {
+    if (index < 0 || index >= acpi_info.cpu_count) return 0xFFFFFFFF;
+    return acpi_info.cpu_ids[index];
+}
+
+uint32_t x86_get_hw_id(int cpu_index) {
+    if (cpu_index < 0 || cpu_index >= acpi_info.cpu_count) return 0xFFFFFFFF;
+    return acpi_info.cpu_ids[cpu_index];
+}
+
 static struct interrupt_controller x86_intc = {
     .name = "x86_LAPIC",
     .get_cpu_count = x86_get_cpu_count,
+    .get_cpu_id = x86_get_cpu_id,
+    .get_hw_id = x86_get_hw_id,
     .init_local = x86_lapic_init_local,
     .register_handler = x86_intc_register,
     .send_ipi = x86_lapic_send_ipi,
@@ -115,10 +148,19 @@ static struct interrupt_controller x86_intc = {
     .mask = x86_intc_mask,
     .unmask = x86_intc_unmask,
     .start_timer = x86_lapic_set_periodic,
+    .alloc_vector = lapic_alloc_vector,
+    .free_vector = lapic_free_vector,
 };
 
 void lapic_controller_init(void) {
     g_intc = &x86_intc;
+
+    for (int i = 0; i < 32; i++) {
+        int idx = i / 32; int bit = i % 32;
+        vector_bitmap[idx] |= (1u << bit);
+    }
+    vector_bitmap[0x21 / 32] |= (1u << (0x21 % 32));
+    vector_bitmap[0x40 / 32] |= (1u << (0x40 % 32));
 
     mmu_map(mmu_get_kernel_map(), acpi_info.lapic_addr, acpi_info.lapic_paddr,
         MMU_FLAGS_READ | MMU_FLAGS_WRITE | MMU_FLAGS_NOCACHE);

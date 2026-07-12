@@ -19,6 +19,9 @@ int copy_str_from_user(char *dest, const char *user_src, size_t max_len);
 
 // sys_file.c
 int64_t sys_read(int fd, void *user_buf, size_t count);
+int64_t sys_pread64(int fd, void *user_buf, size_t count, int64_t offset);
+int64_t sys_pwrite64(int fd, const void *user_buf, size_t count, int64_t offset);
+int64_t sys_sync(void);
 int64_t sys_write(int fd, const void *user_buf, size_t count);
 int64_t sys_open(const char *user_path, int flags, int mode);
 int64_t sys_close(int fd);
@@ -27,6 +30,8 @@ int64_t sys_lseek(int fd, int64_t offset, int whence);
 int64_t sys_ioctl(int fd, uint64_t request, void *arg);
 int64_t sys_readv(int fd, const void *iov, int iovcnt);
 int64_t sys_writev(int fd, const void *iov, int iovcnt);
+int64_t sys_preadv2(int fd, const void *iov, int iovcnt, uint64_t pos_l, uint64_t pos_h, int flags);
+int64_t sys_pwritev2(int fd, const void *iov, int iovcnt, uint64_t pos_l, uint64_t pos_h, int flags);
 int64_t sys_fcntl(int fd, int cmd, uint64_t arg);
 int64_t sys_flock(int fd, int operation);
 int64_t sys_pipe(int *user_pipefd);
@@ -61,6 +66,8 @@ int64_t sys_symlink(const char *user_target, const char *user_linkpath);
 int64_t sys_mount(const char *user_source, const char *user_target, const char *user_fstype, uint64_t flags, const void *user_data);
 int64_t sys_getdents64(int fd, void *user_buf, size_t count);
 int64_t sys_memfd_create(const char *user_name, unsigned int flags);
+int64_t sys_pivot_root(const char *user_new_root, const char *user_put_old);
+int64_t sys_mknod(const char *user_path, mode_t mode, uint64_t dev);
 
 // sys_proc.c
 int64_t sys_fork(void);

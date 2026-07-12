@@ -10,23 +10,14 @@
 #include <kernel/lock.h>
 #include <kernel/fs/vfs.h>
 #include <kernel/fs/vnode.h>
+#include <kernel/fs/mount.h>
 #include <uapi/sys/stat.h>
 #include <uapi/fcntl.h>
 #include <string.h>
 
 void fill_rdev(struct vnode *vn, struct stat *st) {
     if (vn && S_ISCHR(st->st_mode)) {
-        if (strcmp(vn->v_name, "tty") == 0) {
-            st->st_rdev = (5 << 8) | 0;
-        } else if (strcmp(vn->v_name, "card0") == 0) {
-            st->st_rdev = (226 << 8) | 0;
-        } else if (strcmp(vn->v_name, "null") == 0) {
-            st->st_rdev = (1 << 8) | 3;
-        } else if (strcmp(vn->v_name, "fb0") == 0) {
-            st->st_rdev = (29 << 8) | 0;
-        } else if (strcmp(vn->v_name, "kbd") == 0) {
-            st->st_rdev = (13 << 8) | 64;
-        }
+        st->st_rdev = vn->rdev;
     }
 }
 
@@ -245,7 +236,8 @@ int64_t sys_mount(const char *user_source, const char *user_target, const char *
         return (int64_t)err;
     }
 
-    return -ENOSYS;
+    int err = vfs_mount(source, target, fstype, NULL);
+    return (int64_t)err;
 }
 
 int64_t sys_unlink(const char *user_path) {
@@ -340,4 +332,164 @@ int64_t sys_memfd_create(const char *user_name, unsigned int flags) {
     }
 
     return (int64_t)fd_out;
+}
+
+int64_t sys_pivot_root(const char *user_new_root, const char *user_put_old) {
+    char knew_root[256], kput_old[256];
+    if (copy_str_from_user(knew_root, user_new_root, sizeof(knew_root)) < 0)
+        return -EFAULT;
+    if (copy_str_from_user(kput_old, user_put_old, sizeof(kput_old)) < 0)
+        return -EFAULT;
+
+    struct vnode *new_root_vn = NULL;
+    int err = vfs_lookup(knew_root, NULL, &new_root_vn);
+    if (err < 0) return err;
+    if (new_root_vn->type != S_IFDIR) { vput(new_root_vn); return -ENOTDIR; }
+
+    struct mount *mnt = NULL;
+    spin_lock(&mount_lock);
+    struct mount *pos;
+    list_for_each_entry(pos, &mount_list, mnt_list) {
+        if (pos->mnt_root == new_root_vn && (pos->mnt_flags & MOUNTED)) {
+            mnt = pos;
+            break;
+        }
+    }
+    spin_unlock(&mount_lock);
+    if (!mnt) { vput(new_root_vn); return -EINVAL; }
+
+    char leaf[NAME_MAX + 1];
+    struct vnode *put_old_parent = NULL;
+    size_t leaf_len = 0;
+    do {
+        const char *slash = kput_old;
+        const char *last_slash = NULL;
+        while (*slash) {
+            if (*slash == '/') last_slash = slash;
+            slash++;
+        }
+        if (!last_slash || last_slash == kput_old) { vput(new_root_vn); return -EINVAL; }
+
+        char parent_path[256];
+        size_t parent_len = last_slash - kput_old;
+        if (parent_len >= sizeof(parent_path)) { vput(new_root_vn); return -ENAMETOOLONG; }
+        memcpy(parent_path, kput_old, parent_len);
+        parent_path[parent_len] = '\0';
+
+        leaf_len = strlen(last_slash + 1);
+        if (leaf_len == 0 || leaf_len > NAME_MAX) { vput(new_root_vn); return -EINVAL; }
+        memcpy(leaf, last_slash + 1, leaf_len + 1);
+
+        struct vnode *walk = mnt->mnt_root;
+        vref(walk);
+        char component[NAME_MAX + 1];
+        const char *p = parent_path;
+        while (*p == '/') p++;
+        if (*p) {
+            while (1) {
+                const char *next_slash = NULL;
+                {
+                    const char *t = p;
+                    while (*t) { if (*t == '/') { next_slash = t; break; } t++; }
+                }
+                size_t clen = next_slash ? (size_t)(next_slash - p) : strlen(p);
+                if (clen == 0 || clen > NAME_MAX) { vput(walk); vput(new_root_vn); return -ENOENT; }
+                memcpy(component, p, clen);
+                component[clen] = '\0';
+
+                struct vnode *child = NULL;
+                int e = walk->ops->lookup(walk, component, &child);
+                if (e < 0) {
+                    e = walk->ops->mkdir(walk, component, 0755);
+                    if (e < 0) { vput(walk); vput(new_root_vn); return e; }
+                    e = walk->ops->lookup(walk, component, &child);
+                }
+                if (e < 0) { vput(walk); vput(new_root_vn); return e; }
+                vput(walk);
+                walk = child;
+                if (!next_slash) break;
+                p = next_slash + 1;
+            }
+        }
+        put_old_parent = walk;
+    } while (0);
+
+    struct vnode *put_old_vn = NULL;
+    int e = put_old_parent->ops->lookup(put_old_parent, leaf, &put_old_vn);
+    if (e < 0) {
+        e = put_old_parent->ops->mkdir(put_old_parent, leaf, 0755);
+        if (e < 0) { vput(put_old_parent); vput(new_root_vn); return e; }
+        e = put_old_parent->ops->lookup(put_old_parent, leaf, &put_old_vn);
+    }
+    if (e < 0) { vput(put_old_parent); vput(new_root_vn); return e; }
+    vput(put_old_parent);
+
+    struct mount *old_root_mnt = g_root_vnode->mnt;
+    if (!old_root_mnt || !(old_root_mnt->mnt_flags & MOUNTED)) {
+        vput(new_root_vn); vput(put_old_vn); return -EINVAL;
+    }
+
+    // 새 root Detach
+    mnt->mnt_mountpoint->mnt = NULL;
+    list_del(&mnt->mnt_list);
+
+    // 기존 root Detach
+    g_root_vnode->mnt = NULL;
+    list_del(&old_root_mnt->mnt_list);
+
+    // 새 root를 root로 Mount
+    mnt->mnt_mountpoint = g_root_vnode;
+    g_root_vnode->mnt = mnt;
+    spin_lock(&mount_lock);
+    list_add_tail(&mnt->mnt_list, &mount_list);
+    spin_unlock(&mount_lock);
+
+    // 기존 root를 새로운 곳으로 Mount
+    old_root_mnt->mnt_mountpoint = put_old_vn;
+    put_old_vn->mnt = old_root_mnt;
+    spin_lock(&mount_lock);
+    list_add_tail(&old_root_mnt->mnt_list, &mount_list);
+    spin_unlock(&mount_lock);
+
+    vput(new_root_vn);
+    vput(put_old_vn);
+
+    return 0;
+}
+
+int64_t sys_mknod(const char *user_path, mode_t mode, uint64_t dev) {
+    char kpath[256];
+    if (copy_str_from_user(kpath, user_path, sizeof(kpath)) < 0)
+        return -EFAULT;
+
+    if ((mode & S_IFMT) != S_IFCHR && (mode & S_IFMT) != S_IFBLK)
+        return -EINVAL;
+
+    char parent_path[256];
+    char name[NAME_MAX + 1];
+    const char *slash = kpath;
+    const char *last_slash = NULL;
+    while (*slash) { if (*slash == '/') last_slash = slash; slash++; }
+    if (!last_slash || last_slash == kpath) return -EINVAL;
+    size_t plen = last_slash - kpath;
+    if (plen >= sizeof(parent_path)) return -ENAMETOOLONG;
+    memcpy(parent_path, kpath, plen);
+    parent_path[plen] = '\0';
+    size_t nlen = strlen(last_slash + 1);
+    if (nlen == 0 || nlen > NAME_MAX) return -EINVAL;
+    memcpy(name, last_slash + 1, nlen + 1);
+
+    struct vnode *dvp = NULL;
+    int err = vfs_lookup(parent_path, NULL, &dvp);
+    if (err < 0) return err;
+    if (dvp->type != S_IFDIR) { vput(dvp); return -ENOTDIR; }
+
+    struct vnode *vp = NULL;
+    err = dvp->ops->create(dvp, name, mode, &vp);
+    if (err < 0) { vput(dvp); return err; }
+
+    vp->rdev = (uint32_t)dev;
+    vput(vp);
+    vput(dvp);
+    return 0;
 }
