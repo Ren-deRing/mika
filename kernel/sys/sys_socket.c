@@ -102,6 +102,18 @@ int64_t sys_setsockopt(int fd, int level, int optname, const void *optval, uint3
     return 0;
 }
 
+int64_t sys_getsockopt(int fd, int level, int optname, void *optval, uint32_t *optlen) {
+    (void)level;
+    (void)optname;
+    (void)optval;
+    (void)optlen;
+    struct file *f = fdget(fd);
+    if (!f) return -EBADF;
+    if (!f->f_vn) { fdput(f); return -ENOTSOCK; }
+    fdput(f);
+    return 0;
+}
+
 static struct unix_socket *bound_sockets[MAX_BOUND_SOCKETS];
 static spinlock_t bound_sockets_lock;
 static bool bound_sockets_lock_initialized = false;

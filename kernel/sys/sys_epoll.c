@@ -253,6 +253,7 @@ int64_t sys_epoll_ctl(int epfd, int op, int fd, void *user_event) {
 
 int64_t sys_epoll_wait(int epfd, void *user_events, int maxevents, int timeout) {
     if (maxevents <= 0) return -EINVAL;
+    if ((size_t)maxevents > (SIZE_MAX / sizeof(struct epoll_event))) return -EINVAL;
     if (!is_user_address_range(user_events, sizeof(struct epoll_event) * maxevents)) return -EFAULT;
 
     struct file *epf = fdget(epfd);

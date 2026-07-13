@@ -32,6 +32,8 @@ struct sigaction {
 
 extern pid_t next_pid;
 extern tid_t next_tid;
+pid_t alloc_pid(void);
+tid_t alloc_tid(void);
 
 typedef enum {
     THREAD_EMBRYO,

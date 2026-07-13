@@ -70,6 +70,7 @@ int64_t sys_pivot_root(const char *user_new_root, const char *user_put_old);
 int64_t sys_mknod(const char *user_path, mode_t mode, uint64_t dev);
 
 // sys_proc.c
+int64_t sys_sched_yield(void);
 int64_t sys_fork(void);
 int64_t sys_clone(uint64_t flags, void *child_stack, void *ptid, void *ctid, uint64_t newtls);
 int64_t sys_execve(const char *pathname, char *const argv[], char *const envp[]);
@@ -144,6 +145,7 @@ int64_t sys_recvmsg(int fd, void *user_msg, int flags);
 int64_t sys_sendto(int fd, const void *user_buf, size_t len, int flags, const void *user_dest_addr, uint32_t addrlen);
 int64_t sys_recvfrom(int fd, void *user_buf, size_t len, int flags, void *user_src_addr, uint32_t *user_addrlen);
 int64_t sys_setsockopt(int fd, int level, int optname, const void *optval, uint32_t optlen);
+int64_t sys_getsockopt(int fd, int level, int optname, void *optval, uint32_t *optlen);
 int64_t sys_accept4(int fd, void *user_addr, uint32_t *user_addrlen, int flags);
 
 // sys_poll.c

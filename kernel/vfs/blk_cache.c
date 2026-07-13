@@ -85,21 +85,45 @@ int blk_cache_write(int dev_id, uint64_t sector, const void *buf) {
 }
 
 void blk_cache_flush(int dev_id) {
+    struct { int dev_id; uint64_t sector; } dirty_list[BLK_CACHE_SIZE];
+    int dirty_count = 0;
+
     spin_lock(&blk_cache_lock);
     for (int i = 0; i < BLK_CACHE_SIZE; i++) {
         if (blk_cache[i].valid && blk_cache[i].dirty &&
             (dev_id < 0 || blk_cache[i].dev_id == dev_id)) {
-            ahci_bwrite(blk_cache[i].dev_id,
-                        blk_cache[i].sector,
-                        blk_cache[i].data);
+            dirty_list[dirty_count].dev_id = blk_cache[i].dev_id;
+            dirty_list[dirty_count].sector = blk_cache[i].sector;
+            dirty_count++;
             blk_cache[i].dirty = 0;
         }
     }
     spin_unlock(&blk_cache_lock);
+
+    for (int i = 0; i < dirty_count; i++) {
+        spin_lock(&blk_cache_lock);
+        int idx = blk_cache_lookup(dirty_list[i].dev_id, dirty_list[i].sector);
+        if (idx >= 0) {
+            uint8_t tmp[512];
+            __builtin_memcpy(tmp, blk_cache[idx].data, 512);
+            spin_unlock(&blk_cache_lock);
+            ahci_bwrite(dirty_list[i].dev_id, dirty_list[i].sector, tmp);
+        } else {
+            spin_unlock(&blk_cache_lock);
+        }
+    }
 }
 
 void blk_cache_flush_all(void) {
     blk_cache_flush(-1);
+}
+
+void blk_cache_invalidate(int dev_id, uint64_t sector) {
+    spin_lock(&blk_cache_lock);
+    int idx = blk_cache_lookup(dev_id, sector);
+    if (idx >= 0)
+        blk_cache[idx].valid = 0;
+    spin_unlock(&blk_cache_lock);
 }
 
 static void blk_cache_init(void) {

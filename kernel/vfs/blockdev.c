@@ -2,6 +2,7 @@
 #include <kernel/fs/vnode.h>
 #include <kernel/fs/vfs.h>
 #include <kernel/ahci.h>
+#include <kernel/blk_cache.h>
 #include <kernel/kmem.h>
 #include <kernel/printf.h>
 
@@ -56,12 +57,14 @@ static ssize_t blockdev_write(struct vnode *vp, const void *buf, size_t count, o
         if (chunk_off == 0 && chunk_len == 512) {
             if (ahci_bwrite(blk->dev_id, s, (uint8_t *)buf + done) < 0)
                 return done ? done : -EIO;
+            blk_cache_invalidate(blk->dev_id, s);
         } else {
             if (ahci_bread(blk->dev_id, s, tmp) < 0)
                 return done ? done : -EIO;
             __builtin_memcpy(tmp + chunk_off, (uint8_t *)buf + done, chunk_len);
             if (ahci_bwrite(blk->dev_id, s, tmp) < 0)
                 return done ? done : -EIO;
+            blk_cache_invalidate(blk->dev_id, s);
         }
 
         done += chunk_len;

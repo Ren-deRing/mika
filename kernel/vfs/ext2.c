@@ -338,14 +338,15 @@ static int ext2_set_block_ptr(struct ext2_fs *fs, struct ext2_inode *inode,
             int ret = ext2_write_block(fs, inode->i_block[13], tmp);
             if (ret < 0) { kfree(tmp); return ret; }
         }
+        uint32_t ind_block = tmp[ind_idx];
         if (ind_fresh) {
             __builtin_memset(tmp, 0, fs->block_size);
         } else {
-            int ret = ext2_read_block(fs, tmp[ind_idx], tmp);
+            int ret = ext2_read_block(fs, ind_block, tmp);
             if (ret < 0) { kfree(tmp); return ret; }
         }
         tmp[blk_idx] = phys_block;
-        int ret = ext2_write_block(fs, tmp[ind_idx], tmp);
+        int ret = ext2_write_block(fs, ind_block, tmp);
         kfree(tmp);
         return ret < 0 ? ret : 0;
     }
@@ -380,10 +381,11 @@ static int ext2_set_block_ptr(struct ext2_fs *fs, struct ext2_inode *inode,
             int ret = ext2_write_block(fs, inode->i_block[14], tmp);
             if (ret < 0) { kfree(tmp); return ret; }
         }
+        uint32_t dind_block = tmp[dind_idx];
         if (dind_fresh) {
             __builtin_memset(tmp, 0, fs->block_size);
         } else {
-            int ret = ext2_read_block(fs, tmp[dind_idx], tmp);
+            int ret = ext2_read_block(fs, dind_block, tmp);
             if (ret < 0) { kfree(tmp); return ret; }
         }
         int ind_fresh = 0;
@@ -392,17 +394,18 @@ static int ext2_set_block_ptr(struct ext2_fs *fs, struct ext2_inode *inode,
             if (r < 0) { kfree(tmp); return r; }
             tmp[ind_idx] = ind;
             ind_fresh = 1;
-            int ret = ext2_write_block(fs, tmp[dind_idx], tmp);
+            int ret = ext2_write_block(fs, dind_block, tmp);
             if (ret < 0) { kfree(tmp); return ret; }
         }
+        uint32_t ind_block = tmp[ind_idx];
         if (ind_fresh) {
             __builtin_memset(tmp, 0, fs->block_size);
         } else {
-            int ret = ext2_read_block(fs, tmp[ind_idx], tmp);
+            int ret = ext2_read_block(fs, ind_block, tmp);
             if (ret < 0) { kfree(tmp); return ret; }
         }
         tmp[blk_idx] = phys_block;
-        int ret = ext2_write_block(fs, tmp[ind_idx], tmp);
+        int ret = ext2_write_block(fs, ind_block, tmp);
         kfree(tmp);
         return ret < 0 ? ret : 0;
     }
@@ -568,9 +571,25 @@ static int ext2_remove_dirent(struct ext2_fs *fs, struct ext2_vnode *ddev,
     return -ENOENT;
 }
 
+static void ext2_free_inode(struct ext2_fs *fs, uint32_t ino) {
+    if (ino == 0) return;
+    uint32_t bg = (ino - 1) / fs->inodes_per_group;
+    struct ext2_block_group_desc bgd;
+    if (ext2_read_bg_desc(fs, bg, &bgd) < 0) return;
+    uint32_t idx = (ino - 1) % fs->inodes_per_group;
+    uint8_t *bmap = kmalloc(fs->block_size);
+    if (!bmap) return;
+    if (ext2_read_block(fs, bgd.bg_inode_bitmap, bmap) == 0) {
+        uint32_t byte_idx = idx / 8, bit_idx = idx % 8;
+        bmap[byte_idx] &= ~(1 << bit_idx);
+        ext2_write_block(fs, bgd.bg_inode_bitmap, bmap);
+        bgd.bg_free_inodes_count++;
+        ext2_write_bg_desc(fs, bg, &bgd);
+    }
+    kfree(bmap);
+}
+
 static int ext2_free_block_chain(struct ext2_fs *fs, uint32_t block) {
-    // TODO: for indirect blocks, recursively free entries.
-    // For now, just free the block itself (handles direct only). 
     if (block == 0) return 0;
 
     uint32_t num_groups = (fs->blocks_count + fs->blocks_per_group - 1)
@@ -604,10 +623,28 @@ static int ext2_free_block_chain(struct ext2_fs *fs, uint32_t block) {
     return 0;
 }
 
+static void ext2_free_indirect_tree(struct ext2_fs *fs, uint32_t block, int depth) {
+    if (block == 0) return;
+    if (depth == 0) { ext2_free_block_chain(fs, block); return; }
+
+    uint32_t bs = fs->block_size;
+    uint32_t ptrs = bs / sizeof(uint32_t);
+    uint32_t *buf = kmalloc(bs);
+    if (!buf) return;
+    if (ext2_read_block(fs, block, buf) < 0) { kfree(buf); return; }
+
+    for (uint32_t i = 0; i < ptrs; i++) {
+        if (buf[i]) ext2_free_indirect_tree(fs, buf[i], depth - 1);
+    }
+    kfree(buf);
+    ext2_free_block_chain(fs, block);
+}
+
 // Free all blocks of an inode
 static int ext2_truncate_blocks(struct ext2_fs *fs, struct ext2_inode *inode,
                                 uint32_t new_size) {
     uint32_t bs = fs->block_size;
+    uint32_t ptrs = bs / sizeof(uint32_t);
     uint32_t old_blocks = (inode->i_size + bs - 1) / bs;
     uint32_t new_blocks = (new_size + bs - 1) / bs;
 
@@ -617,7 +654,35 @@ static int ext2_truncate_blocks(struct ext2_fs *fs, struct ext2_inode *inode,
             inode->i_block[i] = 0;
         }
     }
-    // TODO: free indirect blocks
+
+    if (old_blocks > 12 && new_blocks <= 12) {
+        ext2_free_indirect_tree(fs, inode->i_block[12], 1);
+        inode->i_block[12] = 0;
+    } else if (old_blocks > 12 + ptrs && new_blocks > 12 && new_blocks <= 12 + ptrs) {
+        uint32_t start = new_blocks - 12;
+        uint32_t *buf = kmalloc(bs);
+        if (buf && inode->i_block[12] && ext2_read_block(fs, inode->i_block[12], buf) == 0) {
+            for (uint32_t i = start / ptrs; i < ptrs; i++) {
+                if (buf[i]) ext2_free_block_chain(fs, buf[i]);
+            }
+            kfree(buf);
+        } else { kfree(buf); }
+        if (new_blocks == 12) {
+            ext2_free_block_chain(fs, inode->i_block[12]);
+            inode->i_block[12] = 0;
+        }
+    }
+
+    if (old_blocks > 12 + ptrs && new_blocks <= 12 + ptrs) {
+        ext2_free_indirect_tree(fs, inode->i_block[13], 2);
+        inode->i_block[13] = 0;
+    }
+
+    if (old_blocks > 12 + ptrs + ptrs * ptrs && new_blocks <= 12 + ptrs + ptrs * ptrs) {
+        ext2_free_indirect_tree(fs, inode->i_block[14], 3);
+        inode->i_block[14] = 0;
+    }
+
     inode->i_size = new_size;
     return 0;
 }
@@ -892,8 +957,8 @@ static ssize_t ext2_write(struct vnode *vp, const void *buf,
     // Update timestamps and write inode
     dev->inode.i_mtime = 0; // TODO: real timestamp
     dev->inode.i_ctime = 0;
-    uint32_t sectors = (dev->inode.i_size + 511) / 512;
-    dev->inode.i_blocks = sectors;
+    uint32_t alloc_blocks = (dev->inode.i_size + bs - 1) / bs;
+    dev->inode.i_blocks = alloc_blocks * (bs / 512);
     ext2_write_inode(fs, dev->ino, &dev->inode);
 
     return count;
@@ -946,7 +1011,10 @@ static int ext2_create(struct vnode *dvp, const char *name,
 
     // Write inode
     ret = ext2_write_inode(fs, ino, &inode);
-    if (ret < 0) return ret;
+    if (ret < 0) {
+        ext2_free_inode(fs, ino);
+        return ret;
+    }
 
     // Add directory entry
     uint8_t file_type;
@@ -958,11 +1026,17 @@ static int ext2_create(struct vnode *dvp, const char *name,
     else file_type = EXT2_FT_UNKNOWN;
 
     ret = ext2_add_dirent(fs, ddev, name, ino, file_type);
-    if (ret < 0) return ret;
+    if (ret < 0) {
+        ext2_free_inode(fs, ino);
+        return ret;
+    }
 
     // Create vnode
     struct vnode *vn = ext2_create_vnode(fs, ino, &inode);
-    if (!vn) return -ENOMEM;
+    if (!vn) {
+        ext2_free_inode(fs, ino);
+        return -ENOMEM;
+    }
 
     // For directories, create . and ..
     if (inode.i_mode & EXT2_S_IFDIR) {

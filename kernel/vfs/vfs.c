@@ -364,20 +364,21 @@ int vfs_open(const char *path, int flags, mode_t mode, int *fd_out) {
 
     if (err == -ENOENT && (flags & O_CREAT)) {
         char parent_path[256];
-        char child_name[NAME_MAX];
+        char child_name[NAME_MAX + 1];
         
         const char *last_slash = strrchr(clean_path, '/');
         if (!last_slash) {
-            // 상대 경로
             strcpy(parent_path, ".");
-            strcpy(child_name, clean_path);
+            strncpy(child_name, clean_path, NAME_MAX);
+            child_name[NAME_MAX] = '\0';
         } else {
-            // 절대 경로 or 경로포함
             size_t len = last_slash - clean_path;
-            if (len == 0) len = 1; // 루트 "/"
-            strncpy(parent_path, clean_path, len);
+            if (len == 0) len = 1;
+            if (len >= sizeof(parent_path)) return -ENAMETOOLONG;
+            memcpy(parent_path, clean_path, len);
             parent_path[len] = '\0';
-            strcpy(child_name, last_slash + 1);
+            strncpy(child_name, last_slash + 1, NAME_MAX);
+            child_name[NAME_MAX] = '\0';
         }
 
         struct vnode *dvp = NULL;
@@ -391,10 +392,20 @@ int vfs_open(const char *path, int flags, mode_t mode, int *fd_out) {
             }
         }
         
-        vput(dvp); // グッバイ! 君の運命のヒトは僕じゃない
+        vput(dvp);
         if (err != 0) return err;
+    } else if (err == 0 && (flags & O_EXCL) && (flags & O_CREAT)) {
+        vput(vp);
+        return -EEXIST;
     } else if (err != 0) {
         return err;
+    }
+
+    if ((flags & O_TRUNC) && vp->ops && vp->ops->setattr) {
+        struct stat st;
+        memset(&st, 0, sizeof(st));
+        st.st_size = 0;
+        vp->ops->setattr(vp, &st);
     }
 
     struct file *f = file_alloc();
@@ -402,7 +413,7 @@ int vfs_open(const char *path, int flags, mode_t mode, int *fd_out) {
 
     f->f_vn = vp;
     f->f_flags = flags;
-    f->f_pos = 0;
+    f->f_pos = (flags & O_APPEND) ? (off_t)-1 : 0;
 
     if (S_ISCHR(vp->type)) {
         int major = (vp->rdev >> 8) & 0xff;
@@ -441,8 +452,17 @@ int vfs_write(int fd, const void *buf, size_t count) {
         fdput(f); return -ENOSYS;
     }
 
-    int n = f->f_vn->ops->write(f->f_vn, buf, count, f->f_pos);
-    if (n > 0) f->f_pos += n;
+    off_t write_pos = f->f_pos;
+    if (f->f_flags & O_APPEND) {
+        struct stat st;
+        if (f->f_vn->ops->getattr) {
+            f->f_vn->ops->getattr(f->f_vn, &st);
+            write_pos = st.st_size;
+        }
+    }
+
+    int n = f->f_vn->ops->write(f->f_vn, buf, count, write_pos);
+    if (n > 0) f->f_pos = write_pos + n;
     fdput(f);
     return n;
 }

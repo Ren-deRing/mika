@@ -448,10 +448,9 @@ int64_t sys_fstat(int fd, void *user_statbuf) {
         }
         kst.st_blksize = 4096;
         kst.st_dev = 1;
-        kst.st_ino = (ino_t)vp;
+        kst.st_ino = (ino_t)vp->v_ino;
         kst.st_blocks = (kst.st_size + 511) / 512;
         fill_rdev(vp, &kst);
-        dprintf("[sys_fstat] fd: %d (%s), mode: 0x%x, size: %ld, blksize: %ld, dev: %ld, ino: %ld, rdev: %ld\n", fd, vp->v_name, kst.st_mode, kst.st_size, kst.st_blksize, kst.st_dev, kst.st_ino, kst.st_rdev);
     } else if (fd == 0 || fd == 1 || fd == 2) {
         kst.st_mode = S_IFCHR | 0666; 
         kst.st_blksize = 1024;
@@ -559,7 +558,7 @@ int64_t sys_ioctl_impl(int fd, uint64_t request_raw, void *arg) {
             else if (request == FBIOGET_FSCREENINFO) {
                 struct our_fb_fix_screeninfo fb_fix = {0};
                 strcpy(fb_fix.id, "Mika FB");
-                fb_fix.smem_start = (unsigned long)g_boot_info.fb.fb_addr;
+                fb_fix.smem_start = 0;
                 fb_fix.smem_len = g_boot_info.fb.pitch * g_boot_info.fb.height;
                 fb_fix.type = 0; // FB_TYPE_PACKED_PIXELS
                 fb_fix.visual = 2; // FB_VISUAL_TRUECOLOR

@@ -40,7 +40,7 @@ int proc_exec(void *elf_data, size_t elf_size, char *const argv[], char *const e
         return -ENOEXEC;
     }
 
-    struct proc *p = proc_create(__sync_fetch_and_add(&next_pid, 1));
+    struct proc *p = proc_create(alloc_pid());
     if (!p) {
         mmu_destroy_map(new_map);
         return -ENOMEM;
@@ -70,7 +70,7 @@ int proc_exec(void *elf_data, size_t elf_size, char *const argv[], char *const e
     p->p_stack_top = USER_STACK_TOP;
     p->p_brk = ALIGN_UP(brk, PAGE_SIZE);
 
-    struct thread *new_t = thread_create(p, __sync_fetch_and_add(&next_tid, 1), arch_user_trampoline, (void *)p);
+    struct thread *new_t = thread_create(p, alloc_tid(), arch_user_trampoline, (void *)p);
     if (!new_t) {
         proc_free(p);
         return -ENOMEM;
@@ -119,6 +119,10 @@ uintptr_t setup_user_stack(page_table_t *new_map, uintptr_t user_stack_top,
     size_t table_bytes = table_elements * sizeof(uintptr_t);
 
     size_t total_pure_size = table_bytes + strings_size;
+    if (total_pure_size > TMP_STACK_SIZE) {
+        kfree(kbuf);
+        return 0;
+    }
     uintptr_t final_user_rsp = (user_stack_top - total_pure_size) & ~0xFUL;
     size_t total_payload_size = user_stack_top - final_user_rsp;
 

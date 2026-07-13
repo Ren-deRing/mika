@@ -127,9 +127,13 @@ void vma_shared_cleanup(void) {
 }
 
 int64_t sys_mmap(uintptr_t addr, size_t length, int prot, int flags, int fd, int64_t offset) {
-    (void)flags;
+    int map_type = flags & 0x0f;
+    bool map_fixed = (flags & 0x10);
+    bool map_anonymous = (flags & 0x20);
 
     if (length == 0) return -EINVAL;
+    if (map_type != 0x01 && map_type != 0x02 && map_type != 0x00) return -EINVAL;
+    if (fd < 0 && !map_anonymous) return -EINVAL;
 
     struct file *f = (fd >= 0) ? fdget(fd) : NULL;
     if (f && f->f_vn && (strcmp(f->f_vn->v_name, "fb0") == 0 || strcmp(f->f_vn->v_name, "card0") == 0)) {
@@ -167,12 +171,20 @@ int64_t sys_mmap(uintptr_t addr, size_t length, int prot, int flags, int fd, int
                     return -ENOMEM;
                 }
             }
+
+            uint32_t fb_vma_flags = MMU_FLAGS_USER | MMU_FLAGS_WRITE | MMU_FLAGS_READ | MMU_FLAGS_SHARED;
+            struct vm_area *fb_vma = vma_alloc(start, start + aligned_fb_len, fb_vma_flags, f->f_vn, 0);
+            if (fb_vma) {
+                down_write(&curproc->p_vma_lock);
+                vma_insert(&curproc->p_vma_root, &curproc->p_vma_list, fb_vma);
+                up_write(&curproc->p_vma_lock);
+            }
+
             fdput(f);
             return start;
         }
-    fdput(f);
+    if (fd >= 0 && f) fdput(f);
 
-    bool map_fixed = (flags & 0x10); // MAP_FIXED
     size_t aligned_len = ALIGN_UP(length, PAGE_SIZE);
     bool need_search = (addr == 0);
 

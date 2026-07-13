@@ -73,6 +73,7 @@ void vfs_load_initrd(uintptr_t addr, uint64_t size) {
 
     while (ptr < end) {
         struct cpio_header *h = (struct cpio_header *)ptr;
+        if ((uintptr_t)(ptr + sizeof(struct cpio_header)) > (uintptr_t)end) break;
         if (strncmp(h->c_magic, "070701", 6) != 0) break;
 
         uint32_t filesize = hex8_to_u32(h->c_filesize);
@@ -85,6 +86,8 @@ void vfs_load_initrd(uintptr_t addr, uint64_t size) {
         uint32_t head_size = sizeof(struct cpio_header) + namesize;
         uint32_t data_off  = (head_size + 3) & ~3;
         uint8_t *data      = ptr + data_off;
+
+        if ((uintptr_t)(data + ((filesize + 3) & ~3)) > (uintptr_t)end) break;
 
         char *path = kmalloc(4096);
         if (!path) {

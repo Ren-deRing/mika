@@ -21,21 +21,21 @@ static inline void init_waitqueue_head(wait_queue_head_t *wq) {
 }
 
 static inline void add_wait_queue(wait_queue_head_t *wq, struct thread *t) {
-    spin_lock(&wq->lock);
+    uint64_t flags = spin_lock_irqsave(&wq->lock);
     if (t->t_wait_node.next == NULL)
         list_init(&t->t_wait_node);
     if (list_empty(&t->t_wait_node))
         list_add_tail(&t->t_wait_node, &wq->head);
-    spin_unlock(&wq->lock);
+    spin_unlock_irqrestore(&wq->lock, flags);
 }
 
 static inline void remove_wait_queue(wait_queue_head_t *wq, struct thread *t) {
-    spin_lock(&wq->lock);
+    uint64_t flags = spin_lock_irqsave(&wq->lock);
     if (t->t_wait_node.next != NULL && !list_empty(&t->t_wait_node)) {
         list_del(&t->t_wait_node);
         list_init(&t->t_wait_node);
     }
-    spin_unlock(&wq->lock);
+    spin_unlock_irqrestore(&wq->lock, flags);
 }
 
 #define __wait_event(wq, condition)                                     \
@@ -78,11 +78,11 @@ static inline void remove_wait_queue(wait_queue_head_t *wq, struct thread *t) {
     })
 
 static inline void wake_up(wait_queue_head_t *wq) {
-    spin_lock(&wq->lock);
+    uint64_t flags = spin_lock_irqsave(&wq->lock);
     if (!list_empty(&wq->head)) {
         struct list_node *head_next = wq->head.next;
         if ((uintptr_t)head_next < 0x10) {
-            spin_unlock(&wq->lock);
+            spin_unlock_irqrestore(&wq->lock, flags);
             return;
         }
         struct thread *t = list_first_entry(&wq->head, struct thread, t_wait_node);
@@ -91,15 +91,15 @@ static inline void wake_up(wait_queue_head_t *wq) {
         t->t_state = THREAD_READY;
         sched_enqueue(t);
     }
-    spin_unlock(&wq->lock);
+    spin_unlock_irqrestore(&wq->lock, flags);
 }
 
 static inline void wake_up_all(wait_queue_head_t *wq) {
-    spin_lock(&wq->lock);
+    uint64_t flags = spin_lock_irqsave(&wq->lock);
     while (!list_empty(&wq->head)) {
         struct list_node *head_next = wq->head.next;
         if ((uintptr_t)head_next < 0x10) {
-            spin_unlock(&wq->lock);
+            spin_unlock_irqrestore(&wq->lock, flags);
             return;
         }
         struct thread *t = list_first_entry(&wq->head, struct thread, t_wait_node);
@@ -108,5 +108,5 @@ static inline void wake_up_all(wait_queue_head_t *wq) {
         t->t_state = THREAD_READY;
         sched_enqueue(t);
     }
-    spin_unlock(&wq->lock);
+    spin_unlock_irqrestore(&wq->lock, flags);
 }

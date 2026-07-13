@@ -8,6 +8,8 @@
 .vscode
 .cache
 
+/opencode.json
+/compile_commands.json
 /disk.img
 *.o
 *.so

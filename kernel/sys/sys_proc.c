@@ -30,6 +30,11 @@
 #define CLONE_CHILD_CLEARTID 0x00200000
 #define CLONE_CHILD_SETTID   0x01000000
 
+int64_t sys_sched_yield(void) {
+    thread_yield();
+    return 0;
+}
+
 int64_t sys_clone(uint64_t flags, void *child_stack, void *ptid, void *ctid, uint64_t newtls) {
     int *parent_tid = (int *)ptid;
     int *child_tid = (int *)ctid;
@@ -61,7 +66,7 @@ int64_t sys_clone(uint64_t flags, void *child_stack, void *ptid, void *ctid, uin
             child_t->t_trapframe->rsp = (uintptr_t)child_stack;
         }
 
-        child_t->t_tid = __sync_fetch_and_add(&next_tid, 1);
+        child_t->t_tid = alloc_tid();
         child_t->t_proc = curproc;
         child_t->t_state = THREAD_READY;
         child_t->t_flags = curthread->t_flags;
@@ -107,10 +112,13 @@ int64_t sys_clone(uint64_t flags, void *child_stack, void *ptid, void *ctid, uin
         kfree_aligned(child_t);
         return -EFAULT;
     } else {
+        if (flags & (CLONE_VM | CLONE_SIGHAND | CLONE_FILES))
+            return -EINVAL;
+
         struct proc *parent_p = curproc;
         struct thread *parent_t = curthread;
 
-        struct proc *child_p = proc_create(__sync_fetch_and_add(&next_pid, 1));
+        struct proc *child_p = proc_create(alloc_pid());
         if (!child_p) return -ENOMEM;
 
         child_p->p_parent = parent_p;
@@ -194,7 +202,7 @@ int64_t sys_clone(uint64_t flags, void *child_stack, void *ptid, void *ctid, uin
             child_t->t_trapframe->rsp = (uintptr_t)child_stack;
         }
 
-        child_t->t_tid = __sync_fetch_and_add(&next_tid, 1);
+        child_t->t_tid = alloc_tid();
         child_t->t_proc = child_p;
         child_p->p_threads = child_t;
         child_t->t_state = THREAD_READY;

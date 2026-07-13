@@ -15,6 +15,21 @@
 pid_t next_pid = 1;
 tid_t next_tid = 1;
 
+pid_t alloc_pid(void) {
+    for (;;) {
+        pid_t pid = __sync_fetch_and_add(&next_pid, 1);
+        if (pid <= 0 || pid == INT32_MAX) {
+            __sync_fetch_and_add(&next_pid, 1);
+            continue;
+        }
+        if (!find_proc(pid)) return pid;
+    }
+}
+
+tid_t alloc_tid(void) {
+    return __sync_fetch_and_add(&next_tid, 1);
+}
+
 LIST_HEAD(g_proc_list);
 spinlock_t g_proc_list_lock = SPINLOCK_INITIALIZER;
 
@@ -33,8 +48,12 @@ struct thread* thread_create(struct proc *p, tid_t tid, void (*entry)(void *), v
 
     t->t_tid = tid;
     t->t_proc = p;
+
+    uint64_t p_flags = spin_lock_irqsave(&p->p_lock);
     t->t_proc_next = p->p_threads;
     p->p_threads = t;
+    spin_unlock_irqrestore(&p->p_lock, p_flags);
+
     t->t_state = THREAD_READY;
     t->t_ticks = 0;
     t->t_need_resched = false;
@@ -180,23 +199,19 @@ void proc_ref(struct proc *p) {
 
 void proc_put(struct proc *p) {
     if (!p) return;
-    uint64_t flags = spin_lock_irqsave(&p->p_lock);
+
+    uint64_t g_flags = spin_lock_irqsave(&g_proc_list_lock);
+    uint64_t p_flags = spin_lock_irqsave(&p->p_lock);
     p->p_refcnt--;
     bool should_free = (p->p_refcnt == 0);
-    spin_unlock_irqrestore(&p->p_lock, flags);
+    spin_unlock_irqrestore(&p->p_lock, p_flags);
 
     if (should_free) {
-        uint64_t g_flags = spin_lock_irqsave(&g_proc_list_lock);
-        spin_lock(&p->p_lock);
-        bool still_zero = (p->p_refcnt == 0);
-        spin_unlock(&p->p_lock);
-        if (still_zero) {
-            list_del(&p->p_list_link);
-            spin_unlock_irqrestore(&g_proc_list_lock, g_flags);
-            proc_free(p);
-        } else {
-            spin_unlock_irqrestore(&g_proc_list_lock, g_flags);
-        }
+        list_del(&p->p_list_link);
+        spin_unlock_irqrestore(&g_proc_list_lock, g_flags);
+        proc_free(p);
+    } else {
+        spin_unlock_irqrestore(&g_proc_list_lock, g_flags);
     }
 }
 

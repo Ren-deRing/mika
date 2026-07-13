@@ -1,9 +1,11 @@
 #include <kernel/fs/vfs.h>
 #include <kernel/fs/mount.h>
 #include <kernel/fs/vnode.h>
+#include <kernel/fs/file.h>
 #include <kernel/kmem.h>
 #include <kernel/printf.h>
 #include <kernel/init.h>
+#include <kernel/proc.h>
 
 #include <uapi/errno.h>
 #include <uapi/fcntl.h>
@@ -12,6 +14,9 @@
 static struct list_node fs_type_list = LIST_HEAD_INIT(fs_type_list);
 struct list_node mount_list  = LIST_HEAD_INIT(mount_list);
 spinlock_t mount_lock;
+
+extern struct list_node g_proc_list;
+extern spinlock_t g_proc_list_lock;
 
 static int mount_inited = 0;
 
@@ -124,6 +129,27 @@ int vfs_umount(const char *target_path) {
         struct mount *pos = list_entry(node, struct mount, mnt_list);
         node = node->next;
         if (pos->mnt_mountpoint == target_vn) {
+            if (pos->mnt_root && pos->mnt_root != g_root_vnode) {
+                bool busy = false;
+                for (int i = 0; i < MAX_FILES; i++) {
+                    struct proc *p;
+                    list_for_each_entry(p, &g_proc_list, p_list_link) {
+                        if (p->p_fd_table[i] && p->p_fd_table[i]->f_vn) {
+                            struct vnode *fvn = p->p_fd_table[i]->f_vn;
+                            if (fvn == pos->mnt_root || fvn->v_parent == pos->mnt_root) {
+                                busy = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (busy) break;
+                }
+                if (busy) {
+                    spin_unlock(&mount_lock);
+                    vput(target_vn);
+                    return -EBUSY;
+                }
+            }
             list_del(&pos->mnt_list);
             target_vn->mnt = NULL;
             spin_unlock(&mount_lock);

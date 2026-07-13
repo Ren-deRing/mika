@@ -12,6 +12,7 @@ static LIST_HEAD(vnode_free_list);
 
 static spinlock_t vnode_list_lock = SPINLOCK_INITIALIZER;
 static struct list_node vnode_hash[VNODE_HASH_SIZE];
+static uint64_t vnode_ino_counter = 1;
 
 void vnode_init(void) {
     for (int i = 0; i < VNODE_HASH_SIZE; i++) {
@@ -62,6 +63,7 @@ struct vnode* vnode_alloc(uint32_t type, struct vnode_ops *ops) {
     vn->type = type;
     vn->ops = ops;
     vn->v_reclaimable = 0;
+    vn->v_ino = __sync_fetch_and_add(&vnode_ino_counter, 1);
 
     rwlock_init(&vn->rwlock);
     mutex_init(&vn->io_mutex);

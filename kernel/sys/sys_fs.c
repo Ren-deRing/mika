@@ -15,6 +15,13 @@
 #include <uapi/fcntl.h>
 #include <string.h>
 
+#ifndef F_OK
+#define F_OK 0
+#define X_OK 1
+#define W_OK 2
+#define R_OK 4
+#endif
+
 void fill_rdev(struct vnode *vn, struct stat *st) {
     if (vn && S_ISCHR(st->st_mode)) {
         st->st_rdev = vn->rdev;
@@ -64,7 +71,7 @@ int64_t sys_newfstatat(int dirfd, const char *user_path, void *user_statbuf, int
     }
     kst.st_blksize = 4096;
     kst.st_dev = 1;
-    kst.st_ino = (ino_t)vn;
+    kst.st_ino = (ino_t)vn->v_ino;
     kst.st_blocks = (kst.st_size + 511) / 512;
     fill_rdev(vn, &kst);
 
@@ -112,7 +119,7 @@ int64_t sys_stat(const char *user_path, void *user_statbuf) {
     }
     kst.st_blksize = 4096;
     kst.st_dev = 1;
-    kst.st_ino = (ino_t)vn;
+    kst.st_ino = (ino_t)vn->v_ino;
     kst.st_blocks = (kst.st_size + 511) / 512;
     fill_rdev(vn, &kst);
 
@@ -260,7 +267,6 @@ int64_t sys_rename(const char *user_old, const char *user_new) {
 }
 
 int64_t sys_access(const char *user_path, int mode) {
-    (void)mode;
     char kpath[256];
     if (copy_str_from_user(kpath, user_path, 256) < 0) return -EFAULT;
 
@@ -271,6 +277,31 @@ int64_t sys_access(const char *user_path, int mode) {
     int err = vfs_lookup(clean_path, curproc->p_cwd, &vn);
     if (err < 0) {
         return (int64_t)err;
+    }
+
+    if (mode != F_OK && vn->ops && vn->ops->getattr) {
+        struct stat st;
+        memset(&st, 0, sizeof(st));
+        if (vn->ops->getattr(vn, &st) == 0) {
+            mode_t perms = st.st_mode & 0777;
+            mode_t euid = curproc->p_euid;
+            mode_t egid = curproc->p_egid;
+
+            if (euid == 0) {
+            } else if (euid == st.st_uid) {
+                if ((mode & R_OK) && !(perms & 0400)) { vput(vn); return -EACCES; }
+                if ((mode & W_OK) && !(perms & 0200)) { vput(vn); return -EACCES; }
+                if ((mode & X_OK) && !(perms & 0100)) { vput(vn); return -EACCES; }
+            } else if (egid == st.st_gid) {
+                if ((mode & R_OK) && !(perms & 0040)) { vput(vn); return -EACCES; }
+                if ((mode & W_OK) && !(perms & 0020)) { vput(vn); return -EACCES; }
+                if ((mode & X_OK) && !(perms & 0010)) { vput(vn); return -EACCES; }
+            } else {
+                if ((mode & R_OK) && !(perms & 0004)) { vput(vn); return -EACCES; }
+                if ((mode & W_OK) && !(perms & 0002)) { vput(vn); return -EACCES; }
+                if ((mode & X_OK) && !(perms & 0001)) { vput(vn); return -EACCES; }
+            }
+        }
     }
 
     vput(vn);
@@ -335,6 +366,8 @@ int64_t sys_memfd_create(const char *user_name, unsigned int flags) {
 }
 
 int64_t sys_pivot_root(const char *user_new_root, const char *user_put_old) {
+    if (!curproc || curproc->p_euid != 0) return -EPERM;
+
     char knew_root[256], kput_old[256];
     if (copy_str_from_user(knew_root, user_new_root, sizeof(knew_root)) < 0)
         return -EFAULT;
@@ -431,23 +464,23 @@ int64_t sys_pivot_root(const char *user_new_root, const char *user_put_old) {
 
     // 새 root Detach
     mnt->mnt_mountpoint->mnt = NULL;
+    spin_lock(&mount_lock);
     list_del(&mnt->mnt_list);
 
     // 기존 root Detach
     g_root_vnode->mnt = NULL;
     list_del(&old_root_mnt->mnt_list);
+    spin_unlock(&mount_lock);
 
     // 새 root를 root로 Mount
     mnt->mnt_mountpoint = g_root_vnode;
     g_root_vnode->mnt = mnt;
     spin_lock(&mount_lock);
     list_add_tail(&mnt->mnt_list, &mount_list);
-    spin_unlock(&mount_lock);
 
     // 기존 root를 새로운 곳으로 Mount
     old_root_mnt->mnt_mountpoint = put_old_vn;
     put_old_vn->mnt = old_root_mnt;
-    spin_lock(&mount_lock);
     list_add_tail(&old_root_mnt->mnt_list, &mount_list);
     spin_unlock(&mount_lock);
 

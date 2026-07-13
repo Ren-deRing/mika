@@ -383,8 +383,36 @@ int ramfs_rmdir(struct vnode *dvp, const char *name) {
         curr = curr->next;
     }
 
+    if (!curr) {
+        write_unlock(&dvp->rwlock);
+        return -ENOENT;
+    }
+
+    struct ramfs_entry **prev = &dnode->entries;
+    curr = dnode->entries;
+    while (curr) {
+        if (strcmp(curr->name, name) == 0) {
+            *prev = curr->next;
+
+            struct ramfs_node *fnode = (struct ramfs_node *)curr->vn->data;
+            fnode->unlinked = 1;
+            fnode->my_entry = NULL;
+            curr->vn->v_reclaimable = 1;
+
+            struct vnode *victim = curr->vn;
+            kfree(curr);
+
+            write_unlock(&dvp->rwlock);
+
+            vput(victim);
+            return 0;
+        }
+        prev = &curr->next;
+        curr = curr->next;
+    }
+
     write_unlock(&dvp->rwlock);
-    return ramfs_remove(dvp, name);
+    return -ENOENT;
 }
 
 int ramfs_readdir(struct vnode *vp, void *dirent_buf, size_t count, off_t *off) {
@@ -412,7 +440,7 @@ int ramfs_readdir(struct vnode *vp, void *dirent_buf, size_t count, off_t *off) 
         return -EINVAL;
     }
 
-    de->d_ino = (uintptr_t)curr->vn;
+    de->d_ino = curr->vn->v_ino;
     de->d_reclen = reclen;
     de->d_type = (curr->vn->type == S_IFDIR) ? DT_DIR : DT_REG;
     de->d_off = (*off) + 1;
