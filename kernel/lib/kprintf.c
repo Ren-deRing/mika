@@ -9,6 +9,7 @@
 
 #include <kernel/cpu.h>
 #include <kernel/printf.h>
+#include <kernel/symbol.h>
 #include <kernel/lock.h>
 
 #define STB_SPRINTF_IMPLEMENTATION
@@ -154,3 +155,7 @@ int64_t tty_write(const void *user_buf, size_t count) {
     }
     return (int64_t)count;
 }
+
+EXPORT_SYMBOL(printf);
+EXPORT_SYMBOL(dprintf);
+EXPORT_SYMBOL(snprintf);

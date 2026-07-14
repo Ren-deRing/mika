@@ -136,3 +136,23 @@ typedef struct {
 #define SHN_LORESERVE 0xff00     /* Start of reserved indices */
 #define SHN_ABS       0xfff1     /* Associated symbol has absolute value */
 #define SHN_COMMON    0xfff2     /* Associated symbol is common */
+
+#define R_X86_64_NONE    0
+#define R_X86_64_64      1
+#define R_X86_64_PC32    2
+#define R_X86_64_GOT32   3
+#define R_X86_64_PLT32   4
+#define R_X86_64_COPY    5
+#define R_X86_64_RELATIVE 8
+#define R_X86_64_32S     11
+#define R_X86_64_32      10
+
+typedef struct {
+    Elf64_Addr    r_offset;
+    Elf64_Xword   r_info;
+    Elf64_Sxword  r_addend;
+} Elf64_Rela;
+
+#define ELF64_R_SYM(i)    ((i) >> 32)
+#define ELF64_R_TYPE(i)   ((i) & 0xFFFFFFFFL)
+#define ELF64_R_INFO(s,t) (((Elf64_Xword)(s) << 32) + ((t) & 0xFFFFFFFFL))

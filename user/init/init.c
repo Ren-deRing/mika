@@ -1144,6 +1144,29 @@ void parent_compositor(int read_socks[NUM_CHILDREN]) {
     close(epfd);
 }
 
+#ifndef SYS_finit_module
+#define SYS_finit_module 313
+#endif
+#ifndef SYS_delete_module
+#define SYS_delete_module 176
+#endif
+
+static void test_module_load(void) {
+    TEST("finit_module + delete_module");
+
+    int fd = open("/hello.ko", O_RDONLY);
+    if (fd < 0) { FAIL("open /hello.ko"); return; }
+
+    int ret = syscall(SYS_finit_module, fd, "", 0);
+    close(fd);
+    if (ret < 0) { FAIL("finit_module failed"); return; }
+
+    ret = syscall(SYS_delete_module, "hello", 0);
+    if (ret < 0) { FAIL("delete_module failed"); return; }
+
+    PASS();
+}
+
 static void test_disk_rw(void) {
     TEST("disk read/write via /dev/sda");
 
@@ -1705,6 +1728,9 @@ int main(void) {
 
     check_stdout("after ext2_append");
 
+    test_module_load();
+    check_stdout("after module_load");
+
     int sockets[NUM_CHILDREN][2];
     pid_t pids[NUM_CHILDREN];
     int read_socks[NUM_CHILDREN];
@@ -1787,6 +1813,9 @@ int main(void) {
 
     printf("[Parent] FD count: %d -> %d (delta %d)\n",
            start_fds, end_fds, end_fds - start_fds);
+
+    test_module_load();
+    check_stdout("after module_load");
 
     printf("[INIT] Copying initrd to ext2...\n");
 

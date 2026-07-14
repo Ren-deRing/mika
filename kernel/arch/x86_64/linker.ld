@@ -53,6 +53,12 @@ SECTIONS
         *(.rodata .rodata.*)
         __rodata_end = .;
     } :rodata
+
+    .ksymtab : {
+        __ksymtab_start = .;
+        KEEP(*(SORT_BY_NAME(.ksymtab)))
+        __ksymtab_end = .;
+    } :rodata
     .note.gnu.build-id : {
         *(.note.gnu.build-id)
     } :rodata

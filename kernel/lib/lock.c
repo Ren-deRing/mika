@@ -3,6 +3,7 @@
 #include <kernel/proc.h>
 #include <kernel/sched.h>
 #include <kernel/printf.h>
+#include <kernel/symbol.h>
 
 void spin_lock_init(spinlock_t *lock) {
     lock->now_serving = 0;
@@ -191,3 +192,14 @@ void up_write(rw_semaphore_t *rwsem) {
     }
     spin_unlock_irqrestore(&rwsem->wait_lock, flags);
 }
+
+EXPORT_SYMBOL(spin_lock);
+EXPORT_SYMBOL(spin_unlock);
+EXPORT_SYMBOL(spin_lock_irqsave);
+EXPORT_SYMBOL(spin_unlock_irqrestore);
+EXPORT_SYMBOL(mutex_lock);
+EXPORT_SYMBOL(mutex_unlock);
+EXPORT_SYMBOL(down_read);
+EXPORT_SYMBOL(up_read);
+EXPORT_SYMBOL(down_write);
+EXPORT_SYMBOL(up_write);

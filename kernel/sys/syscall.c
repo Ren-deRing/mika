@@ -4,11 +4,15 @@
 #include <kernel/proc.h>
 #include <kernel/syscall.h>
 #include <kernel/cpu.h>
+#include <kernel/module.h>
 #include <string.h>
 
 #define USER_ADDR_LIMIT  arch_get_user_addr_limit()
 
 typedef int64_t (*syscall_t)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+
+extern int64_t sys_finit_module(int fd, const char *user_params, int flags);
+extern int64_t sys_delete_module(const char *user_name, int flags);
 
 bool is_user_address_range(const void *addr, size_t size) {
     uintptr_t start = (uintptr_t)addr;
@@ -180,6 +184,8 @@ static syscall_t syscall_table[] = {
     [155] = (syscall_t)sys_pivot_root,
     [162] = (syscall_t)sys_sync,
     [165] = (syscall_t)sys_mount,
+    [176] = (syscall_t)sys_delete_module,
+    [313] = (syscall_t)sys_finit_module,
     [200] = (syscall_t)sys_tkill,
     [201] = (syscall_t)sys_time,
     [202] = (syscall_t)sys_futex,

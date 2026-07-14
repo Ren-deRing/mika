@@ -13,6 +13,7 @@
 #include <kernel/printf.h>
 #include <kernel/init.h>
 #include <kernel/cpu.h>
+#include <kernel/symbol.h>
 #include <kernel/mmu.h>
 #include <kernel/sched.h>
 #include <kernel/lock.h>
@@ -1220,6 +1221,16 @@ uint64_t mmu_get_flags(page_table_t* map, uintptr_t virt) {
     spin_unlock_irqrestore(lock, lock_flags);
     return flags;
 }
+
+EXPORT_SYMBOL(page_alloc);
+EXPORT_SYMBOL(page_free);
+EXPORT_SYMBOL(mmu_map);
+EXPORT_SYMBOL(mmu_map_4k);
+EXPORT_SYMBOL(mmu_unmap);
+EXPORT_SYMBOL(mmu_protect_page);
+EXPORT_SYMBOL(mmu_translate);
+EXPORT_SYMBOL(mmu_get_kernel_map);
+EXPORT_SYMBOL(mmu_get_active_map);
 
 mem_initcall(pmm_init, PRIO_FIRST);
 mem_initcall(vmm_init, PRIO_SECOND);

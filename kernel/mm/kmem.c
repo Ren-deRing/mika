@@ -10,8 +10,9 @@
 #include <kernel/init.h>
 #include <kernel/cpu.h>
 #include <kernel/lock.h>
+#include <kernel/printf.h>
 #include <kernel/kasan.h>
-#include "kernel/printf.h"
+#include <kernel/symbol.h>
 
 #include <string.h>
 
@@ -373,5 +374,10 @@ void kfree_aligned(void* ptr) {
     void* raw = ((void**)ptr)[-1];
     kfree(raw);
 }
+
+EXPORT_SYMBOL(kmalloc);
+EXPORT_SYMBOL(kfree);
+EXPORT_SYMBOL(kcalloc);
+EXPORT_SYMBOL(krealloc);
 
 mem_initcall(kmem_init, PRIO_LAST);
