@@ -326,17 +326,16 @@ void sched_tick(void) {
 
     uint64_t now = arch_get_system_ticks();
     
-    spin_lock(&sleep_queue.lock);
+    uint64_t sleep_flags = spin_lock_irqsave(&sleep_queue.lock);
     while (sleep_queue.head && now >= sleep_queue.head->t_sleep_until) {
         struct thread *t = sleep_queue.head;
         sleep_queue.head = t->t_sched_next;
         sched_enqueue(t);
     }
-    spin_unlock(&sleep_queue.lock);
+    spin_unlock_irqrestore(&sleep_queue.lock, sleep_flags);
 
-    static uint64_t last_boost_tick = 0;
-    if (now - last_boost_tick >= 500) {
-        last_boost_tick = now;
+    if (now - curcpu->last_boost_tick >= 500) {
+        curcpu->last_boost_tick = now;
         sched_boost();
     }
 

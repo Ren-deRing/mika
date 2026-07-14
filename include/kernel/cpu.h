@@ -47,6 +47,8 @@ struct cpu {
 
     int      rcu_nesting;
     int      rcu_qs_pending;
+
+    uint64_t last_boost_tick;
 };
 
 #if defined(__x86_64__)

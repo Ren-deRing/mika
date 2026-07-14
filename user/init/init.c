@@ -1479,10 +1479,173 @@ static void test_ext2_smp_append(void) {
     PASS();
 }
 
+static void test_permissions(void) {
+    TEST("permissions: umask/chmod/chown/uid/gid");
+
+    mode_t old_umask = umask(0077);
+    if (old_umask != 0022) {
+        printf("  umask: expected old=022, got %o\n", old_umask);
+        FAIL("umask return value"); return;
+    }
+    if (umask(0022) != 0077) {
+        FAIL("umask second call"); return;
+    }
+
+    uid_t u = getuid();
+    gid_t g = getgid();
+    uid_t eu = geteuid();
+    gid_t eg = getegid();
+    if (u != 0 || g != 0 || eu != 0 || eg != 0) {
+        printf("  expected uid/gid/euid/egid=0, got %d/%d/%d/%d\n", u, g, eu, eg);
+        FAIL("uid/gid initial"); return;
+    }
+
+    if (setegid(200) < 0) { perror("setegid"); FAIL("setegid"); return; }
+    if (seteuid(100) < 0) { perror("seteuid"); FAIL("seteuid"); return; }
+    if (geteuid() != 100) { FAIL("euid after seteuid"); return; }
+    if (getegid() != 200) { FAIL("egid after setegid"); return; }
+    if (getuid() != 0) { FAIL("uid should stay 0"); return; }
+
+    if (seteuid(0) < 0) { perror("seteuid back"); FAIL("seteuid back"); return; }
+    if (setegid(0) < 0) { perror("setegid back"); FAIL("setegid back"); return; }
+
+    if (setgid(20) < 0) { perror("setgid"); FAIL("setgid"); return; }
+    if (getgid() != 20 || getegid() != 20) {
+        FAIL("gid/egid after setgid"); return;
+    }
+    if (setgid(0) < 0) { perror("setgid root"); FAIL("setgid root"); return; }
+
+    if (setresgid(0, 21, 22) < 0) { perror("setresgid"); FAIL("setresgid"); return; }
+    if (getgid() != 0 || getegid() != 21) {
+        FAIL("gid/egid after setresgid"); return;
+    }
+    if (setresuid(0, 11, 12) < 0) { perror("setresuid"); FAIL("setresuid"); return; }
+    if (getuid() != 0 || geteuid() != 11) {
+        FAIL("uid/euid after setresuid"); return;
+    }
+    if (setresuid(0, 0, -1) < 0) { FAIL("restore uid"); return; }
+    if (setresgid(0, 0, -1) < 0) { FAIL("restore gid"); return; }
+
+    int fd = open("/perm_test.txt", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) { perror("open perm_test"); FAIL("create perm_test"); return; }
+    write(fd, "test", 4);
+    close(fd);
+
+    if (chmod("/perm_test.txt", 0400) < 0) { perror("chmod"); FAIL("chmod"); return; }
+    struct stat st;
+    if (stat("/perm_test.txt", &st) < 0) { FAIL("stat perm_test"); return; }
+    if ((st.st_mode & 0777) != 0400) {
+        printf("  chmod: expected 0400, got %o\n", st.st_mode & 0777);
+        FAIL("chmod mode"); return;
+    }
+
+    int fd2 = open("/perm_test.txt", O_WRONLY);
+    if (fd2 < 0) { FAIL("root should bypass DAC for O_WRONLY"); return; }
+    close(fd2);
+
+    chown("/perm_test.txt", 10, 10);
+    seteuid(10);
+
+    fd2 = open("/perm_test.txt", O_RDONLY);
+    if (fd2 < 0) { perror("open ro"); FAIL("open O_RDONLY on 0400"); return; }
+    close(fd2);
+
+    errno = 0;
+    fd2 = open("/perm_test.txt", O_WRONLY);
+    if (fd2 >= 0) {
+        close(fd2);
+        FAIL("open O_WRONLY on 0400 should fail"); return;
+    }
+    if (errno != EACCES) {
+        printf("  expected EACCES(%d), got errno=%d\n", EACCES, errno);
+        FAIL("O_WRONLY errno"); return;
+    }
+
+    seteuid(0);
+    chown("/perm_test.txt", 0, 0);
+
+    fd2 = open("/perm_test.txt", O_RDONLY);
+    if (fd2 < 0) { FAIL("open for fchmod"); return; }
+    if (fchmod(fd2, 0777) < 0) { perror("fchmod"); FAIL("fchmod"); return; }
+    close(fd2);
+    stat("/perm_test.txt", &st);
+    if ((st.st_mode & 0777) != 0777) {
+        FAIL("fchmod mode"); return;
+    }
+
+    if (chown("/perm_test.txt", 10, 20) < 0) { perror("chown"); FAIL("chown"); return; }
+    stat("/perm_test.txt", &st);
+    if (st.st_uid != 10 || st.st_gid != 20) {
+        printf("  chown: uid=%d gid=%d\n", st.st_uid, st.st_gid);
+        FAIL("chown uid/gid"); return;
+    }
+
+    fd2 = open("/perm_test.txt", O_RDONLY);
+    if (fchown(fd2, 30, 40) < 0) { perror("fchown"); FAIL("fchown"); return; }
+    close(fd2);
+    stat("/perm_test.txt", &st);
+    if (st.st_uid != 30 || st.st_gid != 40) {
+        FAIL("fchown uid/gid"); return;
+    }
+
+    umask(0022);
+    fd = open("/perm_umask_test.txt", O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (fd < 0) { FAIL("create umask_test"); return; }
+    close(fd);
+    stat("/perm_umask_test.txt", &st);
+    if ((st.st_mode & 0777) != 0644) {
+        printf("  umask: expected 0644, got %o\n", st.st_mode & 0777);
+        FAIL("umask on create"); return;
+    }
+    umask(0022);
+
+    unlink("/perm_test.txt");
+    unlink("/perm_umask_test.txt");
+
+    fd = open("/perm_dir_test", O_WRONLY | O_CREAT | O_TRUNC, 0755);
+    if (fd < 0) { FAIL("create dir_test"); return; }
+    close(fd);
+
+    unlink("/perm_dir_test");
+
+    fd = open("/perm_nonroot.txt", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) { FAIL("create nonroot_test"); return; }
+    close(fd);
+
+    if (setuid(10) < 0) { perror("setuid"); FAIL("setuid"); return; }
+    if (getuid() != 10 || geteuid() != 10) {
+        FAIL("uid/euid after setuid"); return;
+    }
+    if (setgid(99) == 0) { FAIL("setgid from non-root should fail"); return; }
+    if (setuid(99) == 0) { FAIL("setuid from non-root should fail"); return; }
+    errno = 0;
+    if (chmod("/perm_nonroot.txt", 0600) == 0) {
+        FAIL("chmod from non-root should fail"); return;
+    }
+    if (errno != EPERM) {
+        printf("  chmod non-root: expected EPERM(%d), got %d\n", EPERM, errno);
+        FAIL("chmod non-root errno"); return;
+    }
+    unlink("/perm_nonroot.txt");
+
+    PASS();
+}
+
 int main(void) {
     open("/dev/tty", O_RDWR);
     open("/dev/tty", O_RDWR);
     open("/dev/tty", O_RDWR);
+
+    if (!getenv("_INIT_EXECVED")) {
+        pid_t pid = fork();
+        if (pid == 0) {
+            char *args[] = {"/bin/init", NULL};
+            char *env[] = {"_INIT_EXECVED=1", NULL};
+            execve("/bin/init", args, env);
+            _exit(1);
+        }
+        return 0;
+    }
 
     printf("=== Comprehensive stress test ===\n\n");
 
@@ -1539,6 +1702,8 @@ int main(void) {
     test_ext2_smp_mt();
     test_ext2_smp_shared();
     test_ext2_smp_append();
+
+    check_stdout("after ext2_append");
 
     int sockets[NUM_CHILDREN][2];
     pid_t pids[NUM_CHILDREN];
@@ -1682,6 +1847,8 @@ int main(void) {
         printf("[INIT] pivot_root failed: %d\n", pivot_ret);
         return 0;
     }
+
+    test_permissions();
 
     struct stat root_st, old_st, init_st;
     if (stat("/", &root_st) == 0 && stat("/oldroot", &old_st) == 0) {

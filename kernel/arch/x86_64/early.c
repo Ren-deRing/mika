@@ -31,6 +31,8 @@ void fpu_init(void) {
     asm volatile ("mov %%cr4, %0" : "=r"(cr4));
     cr4 |= (1 << 9);  // OSFXSR: FXSAVE/FXRSTOR On
     cr4 |= (1 << 10); // OSXMMEXCPT: Unmasked SSE Exception On
+    cr4 |= (1 << 20); // SMEP: Supervisor Mode Execution Prevention
+    cr4 |= (1 << 21); // SMAP: Supervisor Mode Access Prevention
     asm volatile ("mov %0, %%cr4" : : "r"(cr4));
 
     asm volatile ("fninit");

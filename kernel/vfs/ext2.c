@@ -18,13 +18,48 @@
 #define EXT2_BLOCK_SIZE(fs)  ((fs)->block_size)
 #define EXT2_SECTOR_PER_BLOCK(fs) (EXT2_BLOCK_SIZE(fs) / 512)
 
+#define EXT2_VNODE_HASH_SIZE 64
+
 struct ext2_vnode {
     uint32_t ino;
     struct ext2_inode inode;
     struct ext2_fs *fs;
+    struct ext2_vnode *hash_next;
+    struct vnode *vn;
 };
 
 static struct vnode_ops ext2_ops;
+
+static struct vnode *ext2_vnode_cache_lookup(struct ext2_fs *fs, uint32_t ino) {
+    uint32_t h = ino % EXT2_VNODE_HASH_SIZE;
+    struct ext2_vnode *ev = fs->vnode_hash[h];
+    while (ev) {
+        if (ev->ino == ino && ev->fs == fs) {
+            return ev->vn;
+        }
+        ev = ev->hash_next;
+    }
+    return NULL;
+}
+
+static void ext2_vnode_cache_insert(struct ext2_fs *fs, struct ext2_vnode *ev) {
+    uint32_t h = ev->ino % EXT2_VNODE_HASH_SIZE;
+    ev->hash_next = fs->vnode_hash[h];
+    fs->vnode_hash[h] = ev;
+}
+
+static void ext2_vnode_cache_remove(struct ext2_fs *fs, struct ext2_vnode *ev) {
+    uint32_t h = ev->ino % EXT2_VNODE_HASH_SIZE;
+    struct ext2_vnode **pp = (struct ext2_vnode **)&fs->vnode_hash[h];
+    while (*pp) {
+        if (*pp == ev) {
+            *pp = ev->hash_next;
+            ev->hash_next = NULL;
+            return;
+        }
+        pp = &(*pp)->hash_next;
+    }
+}
 
 static int ext2_read_block(struct ext2_fs *fs, uint32_t block, void *buf) {
     uint64_t sector = (uint64_t)block * EXT2_SECTOR_PER_BLOCK(fs);
@@ -169,12 +204,13 @@ static int ext2_write_bg_desc(struct ext2_fs *fs, uint32_t bg,
 static int ext2_write_inode(struct ext2_fs *fs, uint32_t ino,
                             struct ext2_inode *inode) {
     if (ino < 1 || ino > fs->inodes_count) return -EINVAL;
+    spin_lock(&fs->fs_lock);
     uint32_t bg = (ino - 1) / fs->inodes_per_group;
     uint32_t idx = (ino - 1) % fs->inodes_per_group;
 
     struct ext2_block_group_desc bgd;
     int ret = ext2_read_bg_desc(fs, bg, &bgd);
-    if (ret < 0) return ret;
+    if (ret < 0) { spin_unlock(&fs->fs_lock); return ret; }
 
     uint32_t inode_table_block = bgd.bg_inode_table;
     uint32_t inodes_per_block = fs->block_size / fs->inode_size;
@@ -182,30 +218,32 @@ static int ext2_write_inode(struct ext2_fs *fs, uint32_t ino,
     uint32_t offset = (idx % inodes_per_block) * fs->inode_size;
 
     uint8_t *tmp = kmalloc(fs->block_size);
-    if (!tmp) return -ENOMEM;
+    if (!tmp) { spin_unlock(&fs->fs_lock); return -ENOMEM; }
     ret = ext2_read_block(fs, block, tmp);
-    if (ret < 0) { kfree(tmp); return ret; }
+    if (ret < 0) { kfree(tmp); spin_unlock(&fs->fs_lock); return ret; }
     __builtin_memcpy(tmp + offset, inode, sizeof(struct ext2_inode));
     ret = ext2_write_block(fs, block, tmp);
     kfree(tmp);
+    spin_unlock(&fs->fs_lock);
     return ret < 0 ? ret : 0;
 }
 
 static int ext2_alloc_block(struct ext2_fs *fs, uint32_t *new_block) {
+    spin_lock(&fs->fs_lock);
     uint32_t num_groups = (fs->blocks_count + fs->blocks_per_group - 1)
                           / fs->blocks_per_group;
     uint32_t bs = fs->block_size;
     uint8_t *bitmap = kmalloc(bs);
-    if (!bitmap) return -ENOMEM;
+    if (!bitmap) { spin_unlock(&fs->fs_lock); return -ENOMEM; }
 
     for (uint32_t bg = 0; bg < num_groups; bg++) {
         struct ext2_block_group_desc bgd;
         int ret = ext2_read_bg_desc(fs, bg, &bgd);
-        if (ret < 0) { kfree(bitmap); return ret; }
+        if (ret < 0) { kfree(bitmap); spin_unlock(&fs->fs_lock); return ret; }
         if (bgd.bg_free_blocks_count == 0) continue;
 
         ret = ext2_read_block(fs, bgd.bg_block_bitmap, bitmap);
-        if (ret < 0) { kfree(bitmap); return ret; }
+        if (ret < 0) { kfree(bitmap); spin_unlock(&fs->fs_lock); return ret; }
 
         uint32_t start = bg * fs->blocks_per_group;
         uint32_t end = start + fs->blocks_per_group;
@@ -219,36 +257,39 @@ static int ext2_alloc_block(struct ext2_fs *fs, uint32_t *new_block) {
             if (!(bitmap[byte_idx] & (1 << bit_idx))) {
                 bitmap[byte_idx] |= (1 << bit_idx);
                 ret = ext2_write_block(fs, bgd.bg_block_bitmap, bitmap);
-                if (ret < 0) { kfree(bitmap); return ret; }
+                if (ret < 0) { kfree(bitmap); spin_unlock(&fs->fs_lock); return ret; }
 
                 bgd.bg_free_blocks_count--;
                 ext2_write_bg_desc(fs, bg, &bgd);
 
                 kfree(bitmap);
                 *new_block = blk;
+                spin_unlock(&fs->fs_lock);
                 return 0;
             }
         }
     }
     kfree(bitmap);
+    spin_unlock(&fs->fs_lock);
     return -ENOSPC;
 }
 
 static int ext2_alloc_inode(struct ext2_fs *fs, uint32_t *new_ino) {
+    spin_lock(&fs->fs_lock);
     uint32_t num_groups = (fs->inodes_count + fs->inodes_per_group - 1)
                           / fs->inodes_per_group;
     uint32_t bs = fs->block_size;
     uint8_t *bitmap = kmalloc(bs);
-    if (!bitmap) return -ENOMEM;
+    if (!bitmap) { spin_unlock(&fs->fs_lock); return -ENOMEM; }
 
     for (uint32_t bg = 0; bg < num_groups; bg++) {
         struct ext2_block_group_desc bgd;
         int ret = ext2_read_bg_desc(fs, bg, &bgd);
-        if (ret < 0) { kfree(bitmap); return ret; }
+        if (ret < 0) { kfree(bitmap); spin_unlock(&fs->fs_lock); return ret; }
         if (bgd.bg_free_inodes_count == 0) continue;
 
         ret = ext2_read_block(fs, bgd.bg_inode_bitmap, bitmap);
-        if (ret < 0) { kfree(bitmap); return ret; }
+        if (ret < 0) { kfree(bitmap); spin_unlock(&fs->fs_lock); return ret; }
 
         uint32_t start_ino = bg * fs->inodes_per_group + 1;
         uint32_t end_ino = start_ino + fs->inodes_per_group;
@@ -262,18 +303,20 @@ static int ext2_alloc_inode(struct ext2_fs *fs, uint32_t *new_ino) {
             if (!(bitmap[byte_idx] & (1 << bit_idx))) {
                 bitmap[byte_idx] |= (1 << bit_idx);
                 ret = ext2_write_block(fs, bgd.bg_inode_bitmap, bitmap);
-                if (ret < 0) { kfree(bitmap); return ret; }
+                if (ret < 0) { kfree(bitmap); spin_unlock(&fs->fs_lock); return ret; }
 
                 bgd.bg_free_inodes_count--;
                 ext2_write_bg_desc(fs, bg, &bgd);
 
                 kfree(bitmap);
                 *new_ino = ino;
+                spin_unlock(&fs->fs_lock);
                 return 0;
             }
         }
     }
     kfree(bitmap);
+    spin_unlock(&fs->fs_lock);
     return -ENOSPC;
 }
 
@@ -573,12 +616,13 @@ static int ext2_remove_dirent(struct ext2_fs *fs, struct ext2_vnode *ddev,
 
 static void ext2_free_inode(struct ext2_fs *fs, uint32_t ino) {
     if (ino == 0) return;
+    spin_lock(&fs->fs_lock);
     uint32_t bg = (ino - 1) / fs->inodes_per_group;
     struct ext2_block_group_desc bgd;
-    if (ext2_read_bg_desc(fs, bg, &bgd) < 0) return;
+    if (ext2_read_bg_desc(fs, bg, &bgd) < 0) { spin_unlock(&fs->fs_lock); return; }
     uint32_t idx = (ino - 1) % fs->inodes_per_group;
     uint8_t *bmap = kmalloc(fs->block_size);
-    if (!bmap) return;
+    if (!bmap) { spin_unlock(&fs->fs_lock); return; }
     if (ext2_read_block(fs, bgd.bg_inode_bitmap, bmap) == 0) {
         uint32_t byte_idx = idx / 8, bit_idx = idx % 8;
         bmap[byte_idx] &= ~(1 << bit_idx);
@@ -587,26 +631,28 @@ static void ext2_free_inode(struct ext2_fs *fs, uint32_t ino) {
         ext2_write_bg_desc(fs, bg, &bgd);
     }
     kfree(bmap);
+    spin_unlock(&fs->fs_lock);
 }
 
 static int ext2_free_block_chain(struct ext2_fs *fs, uint32_t block) {
     if (block == 0) return 0;
 
+    spin_lock(&fs->fs_lock);
     uint32_t num_groups = (fs->blocks_count + fs->blocks_per_group - 1)
                           / fs->blocks_per_group;
     uint32_t bs = fs->block_size;
     uint8_t *bitmap = kmalloc(bs);
-    if (!bitmap) return -ENOMEM;
+    if (!bitmap) { spin_unlock(&fs->fs_lock); return -ENOMEM; }
 
     uint32_t bg = block / fs->blocks_per_group;
-    if (bg >= num_groups) { kfree(bitmap); return -EINVAL; }
+    if (bg >= num_groups) { kfree(bitmap); spin_unlock(&fs->fs_lock); return -EINVAL; }
 
     struct ext2_block_group_desc bgd;
     int ret = ext2_read_bg_desc(fs, bg, &bgd);
-    if (ret < 0) { kfree(bitmap); return ret; }
+    if (ret < 0) { kfree(bitmap); spin_unlock(&fs->fs_lock); return ret; }
 
     ret = ext2_read_block(fs, bgd.bg_block_bitmap, bitmap);
-    if (ret < 0) { kfree(bitmap); return ret; }
+    if (ret < 0) { kfree(bitmap); spin_unlock(&fs->fs_lock); return ret; }
 
     uint32_t idx = block - bg * fs->blocks_per_group;
     uint32_t byte_idx = idx / 8;
@@ -614,12 +660,13 @@ static int ext2_free_block_chain(struct ext2_fs *fs, uint32_t block) {
     if (bitmap[byte_idx] & (1 << bit_idx)) {
         bitmap[byte_idx] &= ~(1 << bit_idx);
         ret = ext2_write_block(fs, bgd.bg_block_bitmap, bitmap);
-        if (ret < 0) { kfree(bitmap); return ret; }
+        if (ret < 0) { kfree(bitmap); spin_unlock(&fs->fs_lock); return ret; }
         bgd.bg_free_blocks_count++;
         ext2_write_bg_desc(fs, bg, &bgd);
     }
 
     kfree(bitmap);
+    spin_unlock(&fs->fs_lock);
     return 0;
 }
 
@@ -706,6 +753,7 @@ static struct vnode *ext2_create_vnode(struct ext2_fs *fs,
 
     ev->ino = ino;
     ev->fs = fs;
+    ev->vn = vn;
     __builtin_memcpy(&ev->inode, inode, sizeof(struct ext2_inode));
     vn->data = ev;
 
@@ -750,12 +798,28 @@ static int ext2_lookup(struct vnode *dvp, const char *name, struct vnode **vpp) 
             uint32_t name_len = de->name_len;
             if (name_len == strlen(name) &&
                 __builtin_memcmp(de->name, name, name_len) == 0) {
-                struct ext2_inode inode;
-                if (ext2_read_inode(fs, de->inode, &inode) < 0)
-                    return -EIO;
-                struct vnode *vn = ext2_create_vnode(fs, de->inode, &inode);
+                uint32_t found_ino = de->inode;
                 kfree(buf);
+
+                spin_lock(&fs->vnode_hash_lock);
+                struct vnode *cached = ext2_vnode_cache_lookup(fs, found_ino);
+                if (cached) {
+                    spin_unlock(&fs->vnode_hash_lock);
+                    vref(cached);
+                    *vpp = cached;
+                    return 0;
+                }
+                spin_unlock(&fs->vnode_hash_lock);
+
+                struct ext2_inode inode;
+                if (ext2_read_inode(fs, found_ino, &inode) < 0)
+                    return -EIO;
+                struct vnode *vn = ext2_create_vnode(fs, found_ino, &inode);
                 if (!vn) return -ENOMEM;
+                struct ext2_vnode *nev = (struct ext2_vnode *)vn->data;
+                spin_lock(&fs->vnode_hash_lock);
+                ext2_vnode_cache_insert(fs, nev);
+                spin_unlock(&fs->vnode_hash_lock);
                 *vpp = vn;
                 return 0;
             }
@@ -787,13 +851,13 @@ static int ext2_readdir(struct vnode *dvp, void *dirent_buf, size_t count, off_t
         uint32_t block_off = pos % block_size;
         uint32_t phys_block;
         if (ext2_read_block_ptr(fs, &dev->inode, block_idx, &phys_block) < 0)
-            return -EIO;
+            { kfree(buf); return -EIO; }
         if (phys_block == 0) {
             pos += block_size - block_off;
             continue;
         }
         if (ext2_read_block(fs, phys_block, buf) < 0)
-            return -EIO;
+            { kfree(buf); return -EIO; }
 
         while (block_off < block_size && pos < size) {
             struct ext2_dir_entry *de = (struct ext2_dir_entry *)(buf + block_off);
@@ -828,17 +892,20 @@ static int ext2_readdir(struct vnode *dvp, void *dirent_buf, size_t count, off_t
 static ssize_t ext2_read(struct vnode *vp, void *buf, size_t count, off_t off) {
     struct ext2_vnode *dev = (struct ext2_vnode *)vp->data;
     if (!dev) return -ENXIO;
+
+    mutex_lock(&vp->io_mutex);
+
     struct ext2_fs *fs = dev->fs;
 
     uint32_t file_size = dev->inode.i_size;
-    if ((uint64_t)off >= file_size) return 0;
+    if ((uint64_t)off >= file_size) { mutex_unlock(&vp->io_mutex); return 0; }
     if ((uint64_t)off + count > file_size)
         count = file_size - (uint64_t)off;
 
     uint32_t block_size = EXT2_BLOCK_SIZE(fs);
     size_t done = 0;
     uint8_t *tmp = kmalloc(block_size > 4096 ? block_size : 4096);
-    if (!tmp) return -ENOMEM;
+    if (!tmp) { mutex_unlock(&vp->io_mutex); return -ENOMEM; }
 
     while (done < count) {
         uint64_t byte_pos = (uint64_t)off + done;
@@ -847,7 +914,7 @@ static ssize_t ext2_read(struct vnode *vp, void *buf, size_t count, off_t off) {
 
         uint32_t phys_block;
         if (ext2_read_block_ptr(fs, &dev->inode, block_idx, &phys_block) < 0)
-            return done ? done : -EIO;
+            { kfree(tmp); mutex_unlock(&vp->io_mutex); return done ? done : -EIO; }
         if (phys_block == 0) {
             // sparse file — fill with zeros
             size_t chunk = block_size - block_off;
@@ -858,7 +925,7 @@ static ssize_t ext2_read(struct vnode *vp, void *buf, size_t count, off_t off) {
         }
 
         if (ext2_read_block(fs, phys_block, tmp) < 0)
-            return done ? done : -EIO;
+            { kfree(tmp); mutex_unlock(&vp->io_mutex); return done ? done : -EIO; }
 
         size_t chunk = block_size - block_off;
         if (chunk > count - done) chunk = count - done;
@@ -867,12 +934,15 @@ static ssize_t ext2_read(struct vnode *vp, void *buf, size_t count, off_t off) {
     }
 
     kfree(tmp);
+    mutex_unlock(&vp->io_mutex);
     return done;
 }
 
 static int ext2_getattr(struct vnode *vp, struct stat *st) {
     struct ext2_vnode *dev = (struct ext2_vnode *)vp->data;
     if (!dev) return -ENXIO;
+
+    read_lock(&vp->rwlock);
 
     __builtin_memset(st, 0, sizeof(*st));
 
@@ -888,12 +958,17 @@ static int ext2_getattr(struct vnode *vp, struct stat *st) {
     st->st_nlink = dev->inode.i_links_count;
     st->st_ino   = dev->ino;
 
+    read_unlock(&vp->rwlock);
     return 0;
 }
 
 static int ext2_inactive(struct vnode *vp) {
     struct ext2_vnode *dev = (struct ext2_vnode *)vp->data;
     if (dev) {
+        // Remove from vnode cache
+        spin_lock(&dev->fs->vnode_hash_lock);
+        ext2_vnode_cache_remove(dev->fs, dev);
+        spin_unlock(&dev->fs->vnode_hash_lock);
         // Write back inode before freeing
         if (vp->v_reclaimable && dev->ino)
             ext2_write_inode(dev->fs, dev->ino, &dev->inode);
@@ -908,6 +983,10 @@ static ssize_t ext2_write(struct vnode *vp, const void *buf,
     struct ext2_vnode *dev = (struct ext2_vnode *)vp->data;
     if (!dev) return -ENXIO;
     if (vp->type != S_IFREG) return -EISDIR;
+
+    write_lock(&vp->rwlock);
+    mutex_lock(&vp->io_mutex);
+
     struct ext2_fs *fs = dev->fs;
 
     uint32_t bs = fs->block_size;
@@ -919,15 +998,15 @@ static ssize_t ext2_write(struct vnode *vp, const void *buf,
         for (uint32_t bi = old_blocks; bi < new_blocks; bi++) {
             uint32_t blk;
             int ret = ext2_alloc_block(fs, &blk);
-            if (ret < 0) return ret;
+            if (ret < 0) { mutex_unlock(&vp->io_mutex); write_unlock(&vp->rwlock); return ret; }
             ret = ext2_set_block_ptr(fs, &dev->inode, bi, blk);
-            if (ret < 0) return ret;
+            if (ret < 0) { mutex_unlock(&vp->io_mutex); write_unlock(&vp->rwlock); return ret; }
         }
         dev->inode.i_size = new_size;
     }
 
     uint8_t *tmp = kmalloc(bs > 4096 ? bs : 4096);
-    if (!tmp) return -ENOMEM;
+    if (!tmp) { mutex_unlock(&vp->io_mutex); write_unlock(&vp->rwlock); return -ENOMEM; }
     size_t done = 0;
 
     while (done < count) {
@@ -937,7 +1016,7 @@ static ssize_t ext2_write(struct vnode *vp, const void *buf,
 
         uint32_t phys_block;
         int ret = ext2_read_block_ptr(fs, &dev->inode, block_idx, &phys_block);
-        if (ret < 0) { kfree(tmp); return done ? done : ret; }
+        if (ret < 0) { kfree(tmp); mutex_unlock(&vp->io_mutex); write_unlock(&vp->rwlock); return done ? done : ret; }
 
         size_t chunk = bs - block_off;
         if (chunk > count - done) chunk = count - done;
@@ -961,6 +1040,8 @@ static ssize_t ext2_write(struct vnode *vp, const void *buf,
     dev->inode.i_blocks = alloc_blocks * (bs / 512);
     ext2_write_inode(fs, dev->ino, &dev->inode);
 
+    mutex_unlock(&vp->io_mutex);
+    write_unlock(&vp->rwlock);
     return count;
 }
 
@@ -968,21 +1049,24 @@ static int ext2_create(struct vnode *dvp, const char *name,
                        mode_t mode, struct vnode **vpp) {
     if (dvp->type != S_IFDIR) return -ENOTDIR;
 
+    write_lock(&dvp->rwlock);
+
     struct ext2_vnode *ddev = (struct ext2_vnode *)dvp->data;
-    if (!ddev) return -ENXIO;
+    if (!ddev) { write_unlock(&dvp->rwlock); return -ENXIO; }
     struct ext2_fs *fs = ddev->fs;
 
     // Check for existing entry
     struct vnode *existing;
     if (ext2_lookup(dvp, name, &existing) == 0) {
         vput(existing);
+        write_unlock(&dvp->rwlock);
         return -EEXIST;
     }
 
     // Allocate inode
     uint32_t ino;
     int ret = ext2_alloc_inode(fs, &ino);
-    if (ret < 0) return ret;
+    if (ret < 0) { write_unlock(&dvp->rwlock); return ret; }
 
     // Initialize inode
     struct ext2_inode inode;
@@ -998,8 +1082,8 @@ static int ext2_create(struct vnode *dvp, const char *name,
         inode.i_mode = EXT2_S_IFBLK | (mode & 07777);
     else
         inode.i_mode = EXT2_S_IFREG | (mode & 07777);
-    inode.i_uid = 0;
-    inode.i_gid = 0;
+    inode.i_uid = curproc ? curproc->p_euid : 0;
+    inode.i_gid = curproc ? curproc->p_egid : 0;
     inode.i_links_count = 1;
     inode.i_size = 0;
     inode.i_atime = 0;
@@ -1013,6 +1097,7 @@ static int ext2_create(struct vnode *dvp, const char *name,
     ret = ext2_write_inode(fs, ino, &inode);
     if (ret < 0) {
         ext2_free_inode(fs, ino);
+        write_unlock(&dvp->rwlock);
         return ret;
     }
 
@@ -1028,6 +1113,7 @@ static int ext2_create(struct vnode *dvp, const char *name,
     ret = ext2_add_dirent(fs, ddev, name, ino, file_type);
     if (ret < 0) {
         ext2_free_inode(fs, ino);
+        write_unlock(&dvp->rwlock);
         return ret;
     }
 
@@ -1035,8 +1121,15 @@ static int ext2_create(struct vnode *dvp, const char *name,
     struct vnode *vn = ext2_create_vnode(fs, ino, &inode);
     if (!vn) {
         ext2_free_inode(fs, ino);
+        write_unlock(&dvp->rwlock);
         return -ENOMEM;
     }
+
+    // Insert into vnode cache
+    struct ext2_vnode *nev = (struct ext2_vnode *)vn->data;
+    spin_lock(&fs->vnode_hash_lock);
+    ext2_vnode_cache_insert(fs, nev);
+    spin_unlock(&fs->vnode_hash_lock);
 
     // For directories, create . and ..
     if (inode.i_mode & EXT2_S_IFDIR) {
@@ -1051,6 +1144,7 @@ static int ext2_create(struct vnode *dvp, const char *name,
 
     vref(vn);
     *vpp = vn;
+    write_unlock(&dvp->rwlock);
     return 0;
 }
 
@@ -1064,65 +1158,62 @@ static int ext2_mkdir(struct vnode *dvp, const char *name, mode_t mode) {
 static int ext2_remove(struct vnode *dvp, const char *name) {
     if (dvp->type != S_IFDIR) return -ENOTDIR;
 
+    write_lock(&dvp->rwlock);
+
     struct ext2_vnode *ddev = (struct ext2_vnode *)dvp->data;
-    if (!ddev) return -ENXIO;
+    if (!ddev) { write_unlock(&dvp->rwlock); return -ENXIO; }
     struct ext2_fs *fs = ddev->fs;
 
     // Find the inode number
     struct vnode *vp;
     int ret = ext2_lookup(dvp, name, &vp);
-    if (ret < 0) return ret;
+    if (ret < 0) { write_unlock(&dvp->rwlock); return ret; }
     struct ext2_vnode *ev = (struct ext2_vnode *)vp->data;
     uint32_t ino = ev->ino;
 
     // Remove directory entry
     ret = ext2_remove_dirent(fs, ddev, name);
-    if (ret < 0) { vput(vp); return ret; }
+    if (ret < 0) { vput(vp); write_unlock(&dvp->rwlock); return ret; }
 
     // Decrement nlink
     ev->inode.i_links_count--;
     if (ev->inode.i_links_count == 0) {
         // Free blocks and inode
         ext2_truncate_blocks(fs, &ev->inode, 0);
-        // Mark inode as free in bitmap
-        uint32_t bg = (ino - 1) / fs->inodes_per_group;
-        struct ext2_block_group_desc bgd;
-        ext2_read_bg_desc(fs, bg, &bgd);
-        uint32_t idx = (ino - 1) % fs->inodes_per_group;
-        uint8_t *bmap = kmalloc(fs->block_size);
-        if (bmap) {
-            ext2_read_block(fs, bgd.bg_inode_bitmap, bmap);
-            uint32_t byte_idx = idx / 8, bit_idx = idx % 8;
-            bmap[byte_idx] &= ~(1 << bit_idx);
-            ext2_write_block(fs, bgd.bg_inode_bitmap, bmap);
-            bgd.bg_free_inodes_count++;
-            ext2_write_bg_desc(fs, bg, &bgd);
-            kfree(bmap);
-        }
+        // Free inode via bitmap
+        ext2_free_inode(fs, ino);
         ev->inode.i_dtime = 0; // deletion time
         ev->inode.i_links_count = 0;
     }
     ext2_write_inode(fs, ino, &ev->inode);
 
+    // Remove from vnode cache
+    spin_lock(&fs->vnode_hash_lock);
+    ext2_vnode_cache_remove(fs, ev);
+    spin_unlock(&fs->vnode_hash_lock);
+
     vp->v_reclaimable = 1;
     vput(vp);
+    write_unlock(&dvp->rwlock);
     return 0;
 }
 
 static int ext2_rmdir(struct vnode *dvp, const char *name) {
     if (dvp->type != S_IFDIR) return -ENOTDIR;
 
+    write_lock(&dvp->rwlock);
+
     // Check directory is empty
     struct vnode *vp;
     int ret = ext2_lookup(dvp, name, &vp);
-    if (ret < 0) return ret;
+    if (ret < 0) { write_unlock(&dvp->rwlock); return ret; }
     struct ext2_vnode *ev = (struct ext2_vnode *)vp->data;
 
     uint32_t dir_size = ev->inode.i_size;
     uint32_t bs = ev->fs->block_size;
     if (dir_size > bs * 2) {
-        // More than one block
         vput(vp);
+        write_unlock(&dvp->rwlock);
         return -ENOTEMPTY;
     }
 
@@ -1136,6 +1227,7 @@ static int ext2_rmdir(struct vnode *dvp, const char *name) {
         if (d->d_name[0] != '.' ||
             (d->d_name[1] != '\0' && !(d->d_name[1] == '.' && d->d_name[2] == '\0'))) {
             vput(vp);
+            write_unlock(&dvp->rwlock);
             return -ENOTEMPTY;
         }
     }
@@ -1145,12 +1237,13 @@ static int ext2_rmdir(struct vnode *dvp, const char *name) {
     // Remove the directory entry
     struct ext2_vnode *ddev = (struct ext2_vnode *)dvp->data;
     ret = ext2_remove_dirent(ddev->fs, ddev, name);
-    if (ret < 0) return ret;
+    if (ret < 0) { write_unlock(&dvp->rwlock); return ret; }
 
     // Decrement parent link count
     ddev->inode.i_links_count--;
     ext2_write_inode(ddev->fs, ddev->ino, &ddev->inode);
 
+    write_unlock(&dvp->rwlock);
     return 0;
 }
 
@@ -1158,11 +1251,25 @@ static int ext2_setattr(struct vnode *vp, struct stat *st) {
     struct ext2_vnode *dev = (struct ext2_vnode *)vp->data;
     if (!dev) return -ENXIO;
 
-    // TODO
+    write_lock(&vp->rwlock);
+
+    if (st->st_mode != (mode_t)-1) {
+        dev->inode.i_mode = (dev->inode.i_mode & ~07777u) | (st->st_mode & 07777u);
+    }
+    if (st->st_uid != (uid_t)-1) {
+        dev->inode.i_uid = st->st_uid;
+    }
+    if (st->st_gid != (gid_t)-1) {
+        dev->inode.i_gid = st->st_gid;
+    }
+
     if (st->st_size >= 0 && (uint64_t)st->st_size != dev->inode.i_size) {
         ext2_truncate_blocks(dev->fs, &dev->inode, (uint32_t)st->st_size);
-        ext2_write_inode(dev->fs, dev->ino, &dev->inode);
     }
+
+    ext2_write_inode(dev->fs, dev->ino, &dev->inode);
+
+    write_unlock(&vp->rwlock);
     return 0;
 }
 
@@ -1183,6 +1290,9 @@ static struct vnode *ext2_mount(struct vnode *dev_vp, void *data) {
     if (!fs) return NULL;
     __builtin_memset(fs, 0, sizeof(*fs));
     fs->dev_id = dev_id;
+    spin_lock_init(&fs->fs_lock);
+    spin_lock_init(&fs->vnode_hash_lock);
+    __builtin_memset(fs->vnode_hash, 0, sizeof(fs->vnode_hash));
 
     // Read superblock (offset 1024 = sector 2)
     uint8_t sb_buf[1024];

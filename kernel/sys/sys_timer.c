@@ -191,7 +191,6 @@ void posix_timers_tick(void) {
                 if (timer->pt_used && timer->pt_value_ns > 0) {
                     if (now >= timer->pt_value_ns) {
                         int sig = timer->pt_sig_no;
-                        dprintf("[KERNEL POSIX TIMER EXPIRED] thread=%p, slot=%d, sig=%d, now=%lld, val=%lld\n", t, i, sig, now, timer->pt_value_ns);
                         if (sig >= 1 && sig < NSIG) {
                             t->t_sig_pending |= (1ULL << (sig - 1));
                             thread_signal_wakeup(t);

@@ -25,3 +25,6 @@ int vfs_mkdir(const char *path, mode_t mode);
 int vfs_bind(const char *source, const char *target);
 int vfs_unlink(const char *path);
 int vfs_rename(const char *oldpath, const char *newpath);
+
+int vfs_permission(mode_t want, uid_t uid, gid_t gid, mode_t perms);
+int vfs_may_open(struct vnode *vp, int flags);

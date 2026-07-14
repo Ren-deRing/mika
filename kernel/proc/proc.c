@@ -125,6 +125,7 @@ struct proc* proc_create(pid_t pid) {
 
     memset(p, 0, sizeof(struct proc));
     p->p_pid = pid;
+    p->p_umask = 0022;
     spin_lock_init(&p->p_lock);
     spin_lock_init(&p->p_vm_lock);
     rwsem_init(&p->p_vma_lock);

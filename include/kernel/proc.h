@@ -116,8 +116,8 @@ struct thread {
 // PCB
 struct proc {
     pid_t           p_pid;
-    uid_t           p_uid, p_euid;
-    gid_t           p_gid, p_egid;
+    uid_t           p_uid, p_euid, p_suid;
+    gid_t           p_gid, p_egid, p_sgid;
     proc_state_t    p_state;
     spinlock_t      p_lock;
     spinlock_t      p_vm_lock;

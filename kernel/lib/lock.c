@@ -103,14 +103,15 @@ void rwsem_init(rw_semaphore_t *rwsem) {
     spin_lock_init(&rwsem->wait_lock);
     rwsem->count = 0;
     rwsem->owner = NULL;
-    list_init(&rwsem->wait_queue);
+    list_init(&rwsem->read_wait_queue);
+    list_init(&rwsem->write_wait_queue);
 }
 
 void down_read(rw_semaphore_t *rwsem) {
     uint64_t flags;
     while (1) {
         flags = spin_lock_irqsave(&rwsem->wait_lock);
-        if (rwsem->count >= 0) {
+        if (rwsem->count >= 0 && list_empty(&rwsem->write_wait_queue)) {
             rwsem->count++;
             spin_unlock_irqrestore(&rwsem->wait_lock, flags);
             break;
@@ -118,7 +119,7 @@ void down_read(rw_semaphore_t *rwsem) {
         struct thread *t = curthread;
         t->t_state = THREAD_WAITING;
         t->t_lock_to_release = &rwsem->wait_lock;
-        list_add_tail(&t->t_wait_node, &rwsem->wait_queue);
+        list_add_tail(&t->t_wait_node, &rwsem->read_wait_queue);
         thread_yield();
         arch_irq_restore(flags);
     }
@@ -127,11 +128,18 @@ void down_read(rw_semaphore_t *rwsem) {
 void up_read(rw_semaphore_t *rwsem) {
     uint64_t flags = spin_lock_irqsave(&rwsem->wait_lock);
     rwsem->count--;
-    if (rwsem->count == 0 && !list_empty(&rwsem->wait_queue)) {
-        struct thread *waiter = list_first_entry(&rwsem->wait_queue, struct thread, t_wait_node);
-        list_del(&waiter->t_wait_node);
-        waiter->t_state = THREAD_READY;
-        sched_enqueue(waiter);
+    if (rwsem->count == 0) {
+        if (!list_empty(&rwsem->write_wait_queue)) {
+            struct thread *waiter = list_first_entry(&rwsem->write_wait_queue, struct thread, t_wait_node);
+            list_del(&waiter->t_wait_node);
+            waiter->t_state = THREAD_READY;
+            sched_enqueue(waiter);
+        } else if (!list_empty(&rwsem->read_wait_queue)) {
+            struct thread *waiter = list_first_entry(&rwsem->read_wait_queue, struct thread, t_wait_node);
+            list_del(&waiter->t_wait_node);
+            waiter->t_state = THREAD_READY;
+            sched_enqueue(waiter);
+        }
     }
     spin_unlock_irqrestore(&rwsem->wait_lock, flags);
 }
@@ -158,7 +166,7 @@ void down_write(rw_semaphore_t *rwsem) {
         struct thread *t = curthread;
         t->t_state = THREAD_WAITING;
         t->t_lock_to_release = &rwsem->wait_lock;
-        list_add_tail(&t->t_wait_node, &rwsem->wait_queue);
+        list_add_tail(&t->t_wait_node, &rwsem->write_wait_queue);
         
         thread_yield();
         arch_irq_restore(flags);
@@ -170,8 +178,13 @@ void up_write(rw_semaphore_t *rwsem) {
     rwsem->count = 0;
     rwsem->owner = NULL;
     
-    if (!list_empty(&rwsem->wait_queue)) {
-        struct thread *waiter = list_first_entry(&rwsem->wait_queue, struct thread, t_wait_node);
+    if (!list_empty(&rwsem->write_wait_queue)) {
+        struct thread *waiter = list_first_entry(&rwsem->write_wait_queue, struct thread, t_wait_node);
+        list_del(&waiter->t_wait_node);
+        waiter->t_state = THREAD_READY;
+        sched_enqueue(waiter);
+    } else if (!list_empty(&rwsem->read_wait_queue)) {
+        struct thread *waiter = list_first_entry(&rwsem->read_wait_queue, struct thread, t_wait_node);
         list_del(&waiter->t_wait_node);
         waiter->t_state = THREAD_READY;
         sched_enqueue(waiter);

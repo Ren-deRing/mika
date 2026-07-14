@@ -18,6 +18,7 @@
 #include <kernel/printf.h>
 #include <kernel/proc.h>
 #include <kernel/cpu.h>
+
 #include <kernel/atomic.h>
 
 #include <uapi/fcntl.h>
@@ -352,6 +353,46 @@ int vfs_symlink(const char *target, const char *linkpath) {
     return err;
 }
 
+int vfs_permission(mode_t want, uid_t uid, gid_t gid, mode_t perms) {
+    if (curproc->p_euid == 0) return 0;
+
+    if (curproc->p_euid == uid) {
+        if ((want & R_OK) && !(perms & 0400)) return -EACCES;
+        if ((want & W_OK) && !(perms & 0200)) return -EACCES;
+        if ((want & X_OK) && !(perms & 0100)) return -EACCES;
+        return 0;
+    }
+
+    if (curproc->p_egid == gid) {
+        if ((want & R_OK) && !(perms & 0040)) return -EACCES;
+        if ((want & W_OK) && !(perms & 0020)) return -EACCES;
+        if ((want & X_OK) && !(perms & 0010)) return -EACCES;
+        return 0;
+    }
+
+    if ((want & R_OK) && !(perms & 0004)) return -EACCES;
+    if ((want & W_OK) && !(perms & 0002)) return -EACCES;
+    if ((want & X_OK) && !(perms & 0001)) return -EACCES;
+    return 0;
+}
+
+int vfs_may_open(struct vnode *vp, int flags) {
+    if (!vp->ops || !vp->ops->getattr) return 0;
+
+    struct stat st;
+    memset(&st, 0, sizeof(st));
+    if (vp->ops->getattr(vp, &st) < 0) return 0;
+
+    mode_t perms = st.st_mode & 0777;
+    mode_t want = 0;
+    int acc_mode = flags & O_ACCMODE;
+    if (acc_mode == O_RDONLY || acc_mode == O_RDWR) want |= R_OK;
+    if (acc_mode == O_WRONLY || acc_mode == O_RDWR) want |= W_OK;
+
+    if (want == 0) return 0;
+    return vfs_permission(want, st.st_uid, st.st_gid, perms);
+}
+
 int vfs_open(const char *path, int flags, mode_t mode, int *fd_out) {
     if (!curthread || !curthread->t_proc) return -ESRCH;
     struct proc *p = curthread->t_proc;
@@ -385,8 +426,17 @@ int vfs_open(const char *path, int flags, mode_t mode, int *fd_out) {
         err = vfs_lookup(parent_path, p->p_cwd, &dvp);
         if (err != 0) return err;
 
+        if (dvp->ops->getattr) {
+            struct stat dst;
+            memset(&dst, 0, sizeof(dst));
+            if (dvp->ops->getattr(dvp, &dst) == 0) {
+                err = vfs_permission(W_OK, dst.st_uid, dst.st_gid, dst.st_mode & 0777);
+                if (err < 0) { vput(dvp); return err; }
+            }
+        }
+
         if (dvp->ops->create) {
-            err = dvp->ops->create(dvp, child_name, mode, &vp);
+            err = dvp->ops->create(dvp, child_name, mode & ~p->p_umask, &vp);
             if (err == 0) {
                 vfs_hash_insert(dvp, child_name, vp);
             }
@@ -401,10 +451,15 @@ int vfs_open(const char *path, int flags, mode_t mode, int *fd_out) {
         return err;
     }
 
+    err = vfs_may_open(vp, flags);
+    if (err < 0) { vput(vp); return err; }
+
     if ((flags & O_TRUNC) && vp->ops && vp->ops->setattr) {
         struct stat st;
-        memset(&st, 0, sizeof(st));
         st.st_size = 0;
+        st.st_mode = (mode_t)-1;
+        st.st_uid = (uid_t)-1;
+        st.st_gid = (gid_t)-1;
         vp->ops->setattr(vp, &st);
     }
 

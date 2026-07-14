@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <kernel/lock.h>
 
 #define EXT2_SUPER_MAGIC 0xEF53
 #define EXT2_ROOT_INO    2
@@ -128,4 +129,7 @@ struct ext2_fs {
     uint32_t bg_desc_start;
     uint32_t bg_desc_blocks;
     uint16_t desc_per_block;
+    spinlock_t fs_lock;
+    spinlock_t vnode_hash_lock;
+    void *vnode_hash[64];
 };

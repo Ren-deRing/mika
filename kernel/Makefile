@@ -43,20 +43,24 @@ ASM_DEFINES_H := $(GEN_DIR)/asm_defines.h
 
 all: $(K_OBJS)
 
+K_DEP_FLAGS := -MMD -MP
+
 $(filter-out $(NO_KASAN_OBJS), $(K_C_OBJS)): $(OBJ_DIR)/kernel/%.o: %.c
 	@mkdir -p $(dir $@)
 	@echo "[CC] $<"
-	@$(CC) $(BASE_CFLAGS) $(KASAN_CFLAGS) $(CPPFLAGS) -c $< -o $@
+	@$(CC) $(BASE_CFLAGS) $(KASAN_CFLAGS) $(CPPFLAGS) $(K_DEP_FLAGS) -c $< -o $@
 
 $(NO_KASAN_OBJS): $(OBJ_DIR)/kernel/%.o: %.c
 	@mkdir -p $(dir $@)
 	@echo "[CC] (no-asan) $<"
-	@$(CC) $(BASE_CFLAGS) $(CPPFLAGS) -c $< -o $@
+	@$(CC) $(BASE_CFLAGS) $(CPPFLAGS) $(K_DEP_FLAGS) -c $< -o $@
 
 $(K_S_OBJS): $(OBJ_DIR)/kernel/%.o: %.S
 	@mkdir -p $(dir $@)
 	@echo "[AS] $<"
 	@$(CC) $(BASE_CFLAGS) -x assembler-with-cpp $(CPPFLAGS) -c $< -o $@
+
+-include $(K_C_OBJS:.o=.d)
 
 $(ASM_DEFINES_H): $(BASE_DIR)/scripts/gen_asm_defs.c $(BASE_DIR)/include/kernel/proc.h
 	@echo " [GEN] $<"

@@ -211,7 +211,7 @@ int64_t sys_mkdir(const char *user_path, int mode) {
     char kpath[256];
     if (copy_str_from_user(kpath, user_path, 256) < 0) return -EFAULT;
 
-    int err = vfs_mkdir(kpath, (mode_t)mode);
+    int err = vfs_mkdir(kpath, (mode_t)mode & ~curproc->p_umask);
     return (int64_t)err;
 }
 

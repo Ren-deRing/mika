@@ -247,20 +247,30 @@ void* kmalloc(size_t size) {
 
     kmem_magazine_t* mag = c->magazines[idx];
 
-    if (mag->top > 0) {
-        void* ptr = mag->slots[--mag->top];
-        kasan_kmalloc(ptr, size, kmem_class_sizes[idx]);
-        return ptr;
+    {
+        uint64_t flags = arch_irq_save();
+        if (mag->top > 0) {
+            void* ptr = mag->slots[--mag->top];
+            arch_irq_restore(flags);
+            kasan_kmalloc(ptr, size, kmem_class_sizes[idx]);
+            return ptr;
+        }
+        arch_irq_restore(flags);
     }
 
     kmem_magazine_swap_empty(idx);
 
     mag = c->magazines[idx];
 
-    if (mag && mag->top > 0) {
-        void* ptr = mag->slots[--mag->top];
-        kasan_kmalloc(ptr, size, kmem_class_sizes[idx]);
-        return ptr;
+    {
+        uint64_t flags = arch_irq_save();
+        if (mag && mag->top > 0) {
+            void* ptr = mag->slots[--mag->top];
+            arch_irq_restore(flags);
+            kasan_kmalloc(ptr, size, kmem_class_sizes[idx]);
+            return ptr;
+        }
+        arch_irq_restore(flags);
     }
 
     return NULL;
@@ -292,15 +302,24 @@ void kfree(void* ptr) {
 
     kmem_magazine_t* mag = c->magazines[idx];
 
-    if (mag->top < KMEM_MAG_CAPACITY) {
-        mag->slots[mag->top++] = ptr;
-        return;
+    {
+        uint64_t flags = arch_irq_save();
+        if (mag->top < KMEM_MAG_CAPACITY) {
+            mag->slots[mag->top++] = ptr;
+            arch_irq_restore(flags);
+            return;
+        }
+        arch_irq_restore(flags);
     }
 
     kmem_magazine_swap_full(idx);
 
     mag = c->magazines[idx];
-    mag->slots[mag->top++] = ptr;
+    {
+        uint64_t flags = arch_irq_save();
+        mag->slots[mag->top++] = ptr;
+        arch_irq_restore(flags);
+    }
 }
 
 void* krealloc(void* ptr, size_t size) {

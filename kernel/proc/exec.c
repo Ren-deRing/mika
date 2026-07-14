@@ -5,6 +5,7 @@
 #include <kernel/vma.h>
 #include <kernel/cpu.h>
 #include <kernel/sched.h>
+#include <kernel/syscall.h>
 
 #include <uapi/elf.h>
 #include <uapi/errno.h>
@@ -23,6 +24,30 @@ void arch_user_trampoline(void *arg) {
     
     arch_switch_mm(NULL, p); 
     arch_enter_user_mode(p->p_entry, self->t_user_stack_top);
+}
+
+static int copy_user_strlen(const char *user_str) {
+    int len = 0;
+    char c;
+    while (len < 4096) {
+        if (copy_from_user(&c, user_str + len, 1) < 0) return -1;
+        if (c == '\0') return len;
+        len++;
+    }
+    return len;
+}
+
+static int copy_user_string(char *kdest, const char *user_str, size_t max) {
+    size_t i = 0;
+    char c;
+    while (i < max - 1) {
+        if (copy_from_user(&c, user_str + i, 1) < 0) return -1;
+        kdest[i] = c;
+        if (c == '\0') return 0;
+        i++;
+    }
+    kdest[i] = '\0';
+    return 0;
 }
 
 int proc_exec(void *elf_data, size_t elf_size, char *const argv[], char *const envp[]) {
@@ -108,18 +133,59 @@ uintptr_t setup_user_stack(page_table_t *new_map, uintptr_t user_stack_top,
     if (!kbuf) return 0;
     memset(kbuf, 0, TMP_STACK_SIZE);
 
-    int argc = 0; if (argv) { while (argv[argc]) argc++; }
-    int envc = 0; if (envp) { while (envp[envc]) envc++; }
+    int argc = 0;
+    if (argv) {
+        while (1) {
+            char *ptr;
+            if (copy_from_user(&ptr, &argv[argc], sizeof(char *)) < 0) { kfree(kbuf); return 0; }
+            if (!ptr) break;
+            argc++;
+        }
+    }
+    int envc = 0;
+    if (envp) {
+        while (1) {
+            char *ptr;
+            if (copy_from_user(&ptr, &envp[envc], sizeof(char *)) < 0) { kfree(kbuf); return 0; }
+            if (!ptr) break;
+            envc++;
+        }
+    }
 
     size_t strings_size = 0;
-    for (int i = 0; i < argc; i++) { strings_size += strlen(argv[i]) + 1; }
-    for (int i = 0; i < envc; i++) { strings_size += strlen(envp[i]) + 1; }
+    char *k_argv[256];
+    char *k_envp[256];
+    if (argc > 255) argc = 255;
+    if (envc > 255) envc = 255;
+
+    for (int i = 0; i < argc; i++) {
+        char *user_ptr;
+        copy_from_user(&user_ptr, &argv[i], sizeof(char *));
+        int slen = copy_user_strlen(user_ptr);
+        if (slen < 0) { kfree(kbuf); return 0; }
+        k_argv[i] = kmalloc(slen + 1);
+        if (!k_argv[i]) { kfree(kbuf); return 0; }
+        copy_user_string(k_argv[i], user_ptr, slen + 1);
+        strings_size += slen + 1;
+    }
+    for (int i = 0; i < envc; i++) {
+        char *user_ptr;
+        copy_from_user(&user_ptr, &envp[i], sizeof(char *));
+        int slen = copy_user_strlen(user_ptr);
+        if (slen < 0) { kfree(kbuf); return 0; }
+        k_envp[i] = kmalloc(slen + 1);
+        if (!k_envp[i]) { kfree(kbuf); return 0; }
+        copy_user_string(k_envp[i], user_ptr, slen + 1);
+        strings_size += slen + 1;
+    }
 
     size_t table_elements = 1 + argc + 1 + envc + 1 + 32;
     size_t table_bytes = table_elements * sizeof(uintptr_t);
 
     size_t total_pure_size = table_bytes + strings_size;
     if (total_pure_size > TMP_STACK_SIZE) {
+        for (int i = 0; i < argc; i++) kfree(k_argv[i]);
+        for (int i = 0; i < envc; i++) kfree(k_envp[i]);
         kfree(kbuf);
         return 0;
     }
@@ -137,22 +203,22 @@ uintptr_t setup_user_stack(page_table_t *new_map, uintptr_t user_stack_top,
     k_table[0] = (uintptr_t)argc;
     int table_idx = 1;
 
-    // argv
     size_t current_str_offset = 0;
     for (int i = 0; i < argc; i++) {
-        size_t len = strlen(argv[i]) + 1;
-        memcpy(k_strings_pos + current_str_offset, argv[i], len);
+        size_t len = strlen(k_argv[i]) + 1;
+        memcpy(k_strings_pos + current_str_offset, k_argv[i], len);
         k_table[table_idx++] = u_string_pos + current_str_offset;
         current_str_offset += len;
+        kfree(k_argv[i]);
     }
     k_table[table_idx++] = 0; 
 
-    // envp
     for (int i = 0; i < envc; i++) {
-        size_t len = strlen(envp[i]) + 1;
-        memcpy(k_strings_pos + current_str_offset, envp[i], len);
+        size_t len = strlen(k_envp[i]) + 1;
+        memcpy(k_strings_pos + current_str_offset, k_envp[i], len);
         k_table[table_idx++] = u_string_pos + current_str_offset;
         current_str_offset += len;
+        kfree(k_envp[i]);
     }
     k_table[table_idx++] = 0; 
 

@@ -136,9 +136,25 @@ int64_t sys_write(int fd, const void *user_buf, size_t count) {
             fdput(f);
             return tty_write(user_buf, count);
         }
-        int64_t ret = vfs_write(fd, user_buf, count);
+        char kbuf[4096];
+        size_t total = 0;
+        while (total < count) {
+            size_t to_copy = count - total;
+            if (to_copy > sizeof(kbuf)) to_copy = sizeof(kbuf);
+            if (copy_from_user(kbuf, (const char *)user_buf + total, to_copy) < 0) {
+                fdput(f);
+                return (total == 0) ? -EFAULT : (int64_t)total;
+            }
+            int64_t n = vfs_write(fd, kbuf, to_copy);
+            if (n < 0) {
+                fdput(f);
+                return (total == 0) ? n : (int64_t)total;
+            }
+            if (n == 0) break;
+            total += n;
+        }
         fdput(f);
-        return ret;
+        return (int64_t)total;
     }
 
     fdput(f);

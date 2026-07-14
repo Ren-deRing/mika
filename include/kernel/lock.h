@@ -23,17 +23,19 @@ void mutex_init(mutex_t *m);
 void mutex_lock(mutex_t *m);
 void mutex_unlock(mutex_t *m);
 
-#define RWLOCK_INITIALIZER { .val = 0 }
+#define RWLOCK_INITIALIZER { .val = 0, .write_wanted = 0 }
 
 #define RWSEM_INITIALIZER(name) { \
     .wait_lock = SPINLOCK_INITIALIZER, \
     .count = 0, \
     .owner = NULL, \
-    .wait_queue = LIST_HEAD_INIT((name).wait_queue), \
+    .read_wait_queue = LIST_HEAD_INIT((name).read_wait_queue), \
+    .write_wait_queue = LIST_HEAD_INIT((name).write_wait_queue), \
 }
 
 static inline void rwlock_init(rwlock_t *lock) {
     lock->val = 0;
+    lock->write_wanted = 0;
 }
 
 static inline void read_lock(rwlock_t *lock) {
@@ -41,6 +43,10 @@ static inline void read_lock(rwlock_t *lock) {
     do {
         expected = lock->val;
         if (expected & 0x80000000) {
+            arch_pause();
+            continue;
+        }
+        if (lock->write_wanted) {
             arch_pause();
             continue;
         }
@@ -55,6 +61,8 @@ static inline void read_unlock(rwlock_t *lock) {
 
 static inline void write_lock(rwlock_t *lock) {
     uint32_t expected;
+    lock->write_wanted = 1;
+    __sync_synchronize();
     do {
         expected = lock->val;
         if (expected != 0) {
@@ -62,12 +70,12 @@ static inline void write_lock(rwlock_t *lock) {
             continue;
         }
     } while (!__sync_bool_compare_and_swap(&lock->val, 0, 0x80000000));
+    lock->write_wanted = 0;
     __sync_synchronize();
 }
 
 static inline void write_unlock(rwlock_t *lock) {
-    __sync_synchronize();
-    lock->val = 0;
+    __atomic_store_n(&lock->val, 0, __ATOMIC_RELEASE);
 }
 
 static inline uint64_t read_lock_irqsave(rwlock_t *lock) {

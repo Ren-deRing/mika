@@ -22,8 +22,8 @@ struct vnode* ramfs_create_vnode(uint32_t type) {
     memset(node, 0, sizeof(struct ramfs_node));
 
     node->mode = (type == S_IFDIR) ? 0755 : 0644;
-    node->uid = 0;
-    node->gid = 0;
+    node->uid = curproc ? curproc->p_euid : 0;
+    node->gid = curproc ? curproc->p_egid : 0;
     node->nlink = (type == S_IFDIR) ? 2 : 1;
 
     vn->data = node;
@@ -102,8 +102,8 @@ int ramfs_mkdir(struct vnode *dvp, const char *name, mode_t mode) {
 
     struct ramfs_node *node = (struct ramfs_node *)nvp->data;
     node->mode = mode & 07777;
-    node->uid = 0;
-    node->gid = 0;
+    node->uid = curproc ? curproc->p_euid : 0;
+    node->gid = curproc ? curproc->p_egid : 0;
     node->nlink = 2;
 
     struct ramfs_entry *entry = kmalloc(sizeof(struct ramfs_entry));
@@ -147,8 +147,8 @@ int ramfs_create(struct vnode *dvp, const char *name, mode_t mode, struct vnode 
 
     struct ramfs_node *node = (struct ramfs_node *)nvp->data;
     node->mode = mode & 07777;
-    node->uid = 0;
-    node->gid = 0;
+    node->uid = curproc ? curproc->p_euid : 0;
+    node->gid = curproc ? curproc->p_egid : 0;
     node->nlink = 1;
 
     struct ramfs_entry *entry = kmalloc(sizeof(struct ramfs_entry));
@@ -545,9 +545,20 @@ int ramfs_setattr(struct vnode *vp, struct stat *st) {
     write_lock(&vp->rwlock);
 
     struct ramfs_node *node = (struct ramfs_node *)vp->data;
+
+    if (st->st_mode != (mode_t)-1) {
+        node->mode = (node->mode & ~07777) | (st->st_mode & 07777);
+    }
+    if (st->st_uid != (uid_t)-1) {
+        node->uid = st->st_uid;
+    }
+    if (st->st_gid != (gid_t)-1) {
+        node->gid = st->st_gid;
+    }
+
     if (vp->type != S_IFREG) {
         write_unlock(&vp->rwlock);
-        return -EINVAL;
+        return 0;
     }
 
     if (node->is_static_buf) {

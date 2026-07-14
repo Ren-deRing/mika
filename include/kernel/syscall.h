@@ -87,7 +87,17 @@ int64_t sys_geteuid(void);
 int64_t sys_getegid(void);
 int64_t sys_setsid(void);
 int64_t sys_setresuid(uid_t ruid, uid_t euid, uid_t suid);
+int64_t sys_setresgid(gid_t rgid, gid_t egid, gid_t sgid);
+int64_t sys_setreuid(uid_t ruid, uid_t euid);
+int64_t sys_setregid(gid_t rgid, gid_t egid);
 int64_t sys_lchown(const char *user_path, uid_t owner, gid_t group);
+int64_t sys_chown(const char *user_path, uid_t owner, gid_t group);
+int64_t sys_fchown(int fd, uid_t owner, gid_t group);
+int64_t sys_chmod(const char *user_path, mode_t mode);
+int64_t sys_fchmod(int fd, mode_t mode);
+int64_t sys_umask(mode_t mask);
+int64_t sys_setuid(uid_t uid);
+int64_t sys_setgid(gid_t gid);
 
 // sys_mmap.c
 int64_t sys_brk(uintptr_t addr);

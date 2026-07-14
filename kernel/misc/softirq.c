@@ -20,6 +20,7 @@ void do_softirq(struct trapframe *regs) {
 
     curcpu->in_softirq = true;
 
+    bool limit_reached = false;
     int max_loop = 10;
     while (max_loop-- > 0) {
         uint64_t pending = __atomic_exchange_n(&curcpu->softirq_pending, 0,
@@ -35,8 +36,11 @@ void do_softirq(struct trapframe *regs) {
         }
     }
 
-    if (max_loop < 0) {
-        dprintf("[SOFTIRQ] loop limit exceeded\n");
+    if (max_loop <= 0 && __atomic_load_n(&curcpu->softirq_pending, __ATOMIC_ACQUIRE)) {
+        limit_reached = true;
+    }
+
+    if (limit_reached) {
         raise_softirq(TIMER_SOFTIRQ);
     }
 

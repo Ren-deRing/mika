@@ -124,8 +124,10 @@ int64_t sys_clone(uint64_t flags, void *child_stack, void *ptid, void *ctid, uin
         child_p->p_parent = parent_p;
         child_p->p_uid = parent_p->p_uid;
         child_p->p_euid = parent_p->p_euid;
+        child_p->p_suid = parent_p->p_suid;
         child_p->p_gid = parent_p->p_gid;
         child_p->p_egid = parent_p->p_egid;
+        child_p->p_sgid = parent_p->p_sgid;
         child_p->p_umask = parent_p->p_umask;
         memcpy(child_p->p_name, parent_p->p_name, sizeof(parent_p->p_name));
 
@@ -267,8 +269,10 @@ int64_t sys_fork(void) {
     child_p->p_parent = parent_p;
     child_p->p_uid = parent_p->p_uid;
     child_p->p_euid = parent_p->p_euid;
+    child_p->p_suid = parent_p->p_suid;
     child_p->p_gid = parent_p->p_gid;
     child_p->p_egid = parent_p->p_egid;
+    child_p->p_sgid = parent_p->p_sgid;
     child_p->p_umask = parent_p->p_umask;
     memcpy(child_p->p_name, parent_p->p_name, sizeof(parent_p->p_name));
 

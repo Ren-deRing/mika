@@ -540,9 +540,13 @@ void vmm_unmap(page_table_t* pml4, uint64_t virt) {
         invlpg(virt);
 
         if (vmm_pt_is_empty(tables[2])) {
+            page_t *parent = phys_to_page(virt_to_phys(tables[1]));
+            if (parent && parent->ref_count > 0) parent->ref_count--;
             page_free(phys_to_page(virt_to_phys(tables[2])), 0);
             *entries[1] = 0;
             if (vmm_pt_is_empty(tables[1])) {
+                page_t *grandparent = phys_to_page(virt_to_phys(tables[0]));
+                if (grandparent && grandparent->ref_count > 0) grandparent->ref_count--;
                 page_free(phys_to_page(virt_to_phys(tables[1])), 0);
                 *entries[0] = 0;
             }
@@ -566,12 +570,18 @@ void vmm_unmap(page_table_t* pml4, uint64_t virt) {
     invlpg(virt);
 
     if (vmm_pt_is_empty(tables[3])) {
+        page_t *parent = phys_to_page(virt_to_phys(tables[2]));
+        if (parent && parent->ref_count > 0) parent->ref_count--;
         page_free(phys_to_page(virt_to_phys(tables[3])), 0);
         *entries[2] = 0;
         if (vmm_pt_is_empty(tables[2])) {
+            page_t *grandparent = phys_to_page(virt_to_phys(tables[1]));
+            if (grandparent && grandparent->ref_count > 0) grandparent->ref_count--;
             page_free(phys_to_page(virt_to_phys(tables[2])), 0);
             *entries[1] = 0;
             if (vmm_pt_is_empty(tables[1])) {
+                page_t *great = phys_to_page(virt_to_phys(tables[0]));
+                if (great && great->ref_count > 0) great->ref_count--;
                 page_free(phys_to_page(virt_to_phys(tables[1])), 0);
                 *entries[0] = 0;
             }
